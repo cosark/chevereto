@@ -12,7 +12,7 @@
 namespace Chevereto\Legacy;
 
 use Chevere\Filesystem\FilePhpReturn;
-use Chevere\Parameter\Interfaces\CastInterface;
+use Chevere\Parameter\Interfaces\TypedInterface;
 use Chevere\Regex\Regex;
 use Chevere\Writer\Interfaces\WriterInterface;
 use Chevere\Writer\NullWriter;
@@ -27,6 +27,7 @@ use Chevereto\Encryption\Key;
 use Chevereto\Legacy\Classes\AssetStorage;
 use Chevereto\Legacy\Classes\Cache;
 use Chevereto\Legacy\Classes\DB;
+use Chevereto\Legacy\Classes\Image;
 use Chevereto\Legacy\Classes\KeyValue;
 use Chevereto\Legacy\Classes\KeyValueNull;
 use Chevereto\Legacy\Classes\L10n;
@@ -49,6 +50,8 @@ use ErrorException;
 use Exception;
 use Intervention\Image\ImageManagerStatic;
 use InvalidArgumentException;
+use IPLib\Address\IPv4;
+use IPLib\Address\IPv6;
 use IPLib\Factory;
 use JsonException;
 use LogicException;
@@ -64,11 +67,13 @@ use Symfony\Component\Mime\Email;
 use Symfony\Component\Process\Process;
 use Throwable;
 use function Chevere\Filesystem\filePhpForPath;
+use function Chevere\Filesystem\filePhpReturnForPath;
 use function Chevere\Message\message;
-use function Chevere\Parameter\cast;
 use function Chevere\Parameter\getType;
+use function Chevere\Parameter\typed;
 use function Chevere\Writer\streamFor;
 use function Chevere\Writer\writers;
+use function Chevereto\Legacy\G\absolute_to_relative;
 use function Chevereto\Legacy\G\absolute_to_url;
 use function Chevereto\Legacy\G\bytes_to_mb;
 use function Chevereto\Legacy\G\datetimegmt;
@@ -954,6 +959,9 @@ function upload_to_content_images(array $source, string $what): void
             default:
                 throw new Exception('Unknown errors', 602);
         }
+        if (! is_uploaded_file($source['tmp_name'])) {
+            throw new Exception('Invalid source for file upload', 600);
+        }
         $file_contents = file_get_contents($source['tmp_name']);
         if (! $file_contents) {
             throw new Exception("Can't read uploaded file content", 600);
@@ -988,13 +996,9 @@ function upload_to_content_images(array $source, string $what): void
         $db_filename = getSetting($what);
     }
     if ($remove_old) {
-        if ($what === 'watermark_image') {
-            unlinkIfExists(PATH_PUBLIC_CONTENT_IMAGES_SYSTEM . $db_filename);
-        } else {
-            AssetStorage::deleteFiles([
-                'key' => $storagePath . $db_filename,
-            ]);
-        }
+        AssetStorage::deleteFiles([
+            'key' => $storagePath . $db_filename,
+        ]);
     }
     $home_cover_images = [];
     if (isset($cover_handle)) {
@@ -1018,6 +1022,9 @@ function upload_to_content_images(array $source, string $what): void
                 'url' => get_system_image_url($v),
             ];
         }
+    }
+    if ($what === 'watermark_image') {
+        unlinkIfExists(Image::watermarkTempFile());
     }
     Settings::update([
         $what => $filename,
@@ -1072,7 +1079,21 @@ function isSafeToExecute(?int $max_execution_time = null, array $options = []): 
 function checkUpdates(): void
 {
     $CHEVERETO = Settings::getChevereto();
-    $update = fetch_url($CHEVERETO['api']['get']['info']);
+    $update = fetch_url(
+        $CHEVERETO['api']['get']['info'],
+        options: [
+            CURLOPT_POSTFIELDS => http_build_query(
+                [
+                    'version_filesystem' => APP_VERSION,
+                    'version_installed' => cheveretoVersionInstalled(),
+                    'public_url' => getVariable('public_url')->nullString(),
+                    'incoming_email' => getSetting('email_incoming_email'),
+                    'servicing' => env()['CHEVERETO_SERVICING'] ?? 'server',
+                    'license' => getLicenseKey(),
+                ]
+            ),
+        ]
+    );
     if ($update) {
         $json = json_decode($update);
         if ($json === null) {
@@ -1168,7 +1189,7 @@ function preload(): void
     $envFile = filePhpForPath(PATH_APP . 'env.php');
     if ($envFile->file()->exists()) {
         $filePhpReturn = new FilePhpReturn($envFile);
-        $env = $filePhpReturn->cast()->array();
+        $env = $filePhpReturn->get();
     }
     define('ENV', $env);
     $imageLibrary = '';
@@ -1620,12 +1641,26 @@ function loaderHandler(
         ? Settings::get('cdn_url') ?? URL_APP_PUBLIC
         : URL_APP_PUBLIC;
     define('URL_APP_PUBLIC_STATIC', $urlAppPublicStatic);
+    $theme = (string) Settings::get('theme');
+    $valid = Handler::isValidPathSegment($theme)
+        && is_dir(PATH_PUBLIC_CONTENT_LEGACY_THEMES . $theme);
+    if (! $valid) {
+        $theme = 'Peafowl';
+    }
     define(
         'PATH_PUBLIC_LEGACY_THEME',
         PATH_PUBLIC_CONTENT_LEGACY_THEMES
-            . (Settings::get('theme') ?? 'Peafowl')
+            . $theme
             . '/'
     );
+    if (! is_dir(PATH_PUBLIC_LEGACY_THEME)) {
+        throw new RuntimeException(
+            sprintf(
+                'Theme directory `%s` does not exist',
+                absolute_to_relative(PATH_PUBLIC_LEGACY_THEME)
+            )
+        );
+    }
     define('URL_APP_THEME', absolute_to_url(PATH_PUBLIC_LEGACY_THEME, URL_APP_PUBLIC_STATIC));
     define('CHV_PATH_IMAGES', PATH_PUBLIC . '' . $uploadImageFolder . '/');
     filesystemPermissionsCheck();
@@ -1708,6 +1743,14 @@ function loaderHandler(
                 ]);
             }
         }
+        if (PHP_SAPI !== 'cli') {
+            try {
+                if (getVariable('public_url')->nullString() !== URL_APP_PUBLIC) {
+                    Variable::set('public_url', URL_APP_PUBLIC);
+                }
+            } catch (Throwable) {
+            }
+        }
     }
     define('STOP_WORDS', preg_split("/\r\n|\n|\r/", getSetting('stop_words') ?? ''));
     $handler = PATH_APP_LEGACY_LOAD;
@@ -1732,7 +1775,7 @@ function virtualRouteHandleRedirect(string $route, string $base, ?string $virtua
     if (getSetting('root_route') === $route
         && $base === getSetting('route_' . $virtual)) {
         $target = preg_replace(
-            '#/' . getSetting('route_' . $virtual) . '/#',
+            '#/' . preg_quote($base, '#') . '/#',
             '/',
             get_current_url(),
             1
@@ -1969,16 +2012,16 @@ function assertMaxCount(string $table): void
     }
 }
 
-function fetchVariable(string $name): CastInterface
+function fetchVariable(string $name): TypedInterface
 {
-    return cast(
+    return typed(
         Variable::fetch($name)
     );
 }
 
-function getVariable(string $name): CastInterface
+function getVariable(string $name): TypedInterface
 {
-    return cast(
+    return typed(
         Variable::get($name)
     );
 }
@@ -2033,8 +2076,17 @@ function isPublicHost(string $host): bool
 
 function hashFile(string $file): string
 {
+    $path = realpath($file);
+    if ($path === false || ! is_file($path)) {
+        throw new InvalidArgumentException('Invalid file to hash', 600);
+    }
     // We use xxh64 as xxh128 is not available (web browser) @ 2025-04-28
-    return hash_file('xxh64', $file);
+    $hash = hash_file('xxh64', $path);
+    if ($hash === false) {
+        throw new RuntimeException('Unable to hash file', 600);
+    }
+
+    return $hash;
 }
 
 function hashString(string $string): string
@@ -2183,18 +2235,25 @@ function printTable(array $table, string $prefix = ''): void
  * Checks if the remote IP address is contained within the list of allowed IPs/CIDR ranges.
  *
  * @param string $ip The IP address to check (e.g., $_SERVER['REMOTE_ADDR']).
- * @param string $allowedList A comma-separated string of IPs and CIDRs.
+ * @param string ...$allowed A list of IPs and CIDRs.
  * @return bool True if the IP is allowed, false otherwise.
  */
-function isIpAllowed(string $ip, string $allowedList): bool
+function isIpAllowed(string $ip, string ...$allowed): bool
 {
     $address = Factory::parseAddressString($ip);
     if ($address === null) {
         return false;
     }
-    $allowed = array_map('trim', explode(',', $allowedList));
-    foreach ($allowed as $allowedEntry) {
-        $range = Factory::parseRangeString($allowedEntry);
+    /**
+     * @var IPv4|IPv6 $address
+     */
+    if ($address instanceof IPv6
+        && str_starts_with($address->toString(true), '0000:0000:0000:0000:0000:ffff:')
+    ) {
+        $address = $address->toIPv4();
+    }
+    foreach ($allowed as $entry) {
+        $range = Factory::parseRangeString($entry);
         if ($range === null) {
             continue;
         }
@@ -2204,4 +2263,60 @@ function isIpAllowed(string $ip, string $allowedList): bool
     }
 
     return false;
+}
+
+function cloudflareTrustedProxies(): array
+{
+    static $cache = null;
+    if ($cache !== null) {
+        return $cache;
+    }
+    $trustedProxiesFilepath = PATH_APP_CACHE . 'cloudflare/trusted-proxies.php';
+    $file = filePhpReturnForPath($trustedProxiesFilepath);
+
+    return $cache = $file->get();
+}
+
+function clientIpTrustedProxies(): array
+{
+    static $cache = null;
+    if ($cache !== null) {
+        return $cache;
+    }
+    $trustedProxies = array_filter(
+        array_map(
+            'trim',
+            explode(',', (string) (env()['CHEVERETO_HEADER_CLIENT_IP_TRUSTED_PROXIES'] ?? ''))
+        )
+    );
+    $expanded = [];
+    foreach ($trustedProxies as $entry) {
+        array_push($expanded, ...match ($entry) {
+            'cloudflare' => cloudflareTrustedProxies(),
+            'private' => privateTrustedProxies(),
+            default => [$entry],
+        });
+    }
+
+    return $cache = array_values(array_unique($expanded));
+}
+
+/**
+ * Loopback plus RFC 1918 / RFC 4193 private ranges. Excludes CGNAT
+ * (100.64.0.0/10) because real clients use it, and link-local
+ * (169.254.0.0/16, fe80::/10) because it's never a legitimate proxy
+ * hop and includes the cloud metadata address.
+ *
+ * @return string[]
+ */
+function privateTrustedProxies(): array
+{
+    return [
+        '127.0.0.0/8',
+        '::1',
+        '10.0.0.0/8',
+        '172.16.0.0/12',
+        '192.168.0.0/16',
+        'fc00::/7',
+    ];
 }

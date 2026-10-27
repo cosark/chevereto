@@ -128,7 +128,7 @@ return function (Handler $handler) {
             break;
     }
     $handler::setVar('pre_doctitle', $search->q . ' - ' . _s('Search'));
-    $handler::setVar('meta_description', sprintf($meta_description, $safe_html_search['q']));
+    $handler::setVar('meta_description', sprintf($meta_description, $search->q));
     $handler::setVar('search', $search->display);
     $handler::setVar('safe_html_search', $safe_html_search);
     $handler::setVar('tabs', $tabs);

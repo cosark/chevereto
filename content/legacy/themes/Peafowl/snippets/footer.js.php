@@ -110,11 +110,12 @@ document.getElementById("chevereto-js").addEventListener("load", function() {
 	CHV.obj.page_info = <?php echo json_encode($page_info); ?>;
 	<?php
 	if (Login::isLoggedUser()) {
-		$logged_user = Login::getUser();
+		$logged_user = safe_html(Login::getUser());
 		$logged_user_array = [];
 		foreach (['name', 'username', 'id', 'url', 'url_albums'] as $arr) {
 			$logged_user_array[$arr] = $logged_user[$arr == 'id' ? 'id_encoded' : $arr];
-		} ?>
+		}
+	?>
 		CHV.obj.logged_user = <?php echo json_encode($logged_user_array); ?>;
 	<?php
 		if (Login::isAdmin()) {

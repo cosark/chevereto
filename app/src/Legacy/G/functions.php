@@ -23,8 +23,13 @@ use FFMpeg\FFProbe;
 use GdImage;
 use LogicException;
 use Throwable;
+use function Chevere\Writer\writers;
+use function Chevereto\Legacy\clientIpTrustedProxies;
+use function Chevereto\Legacy\cloudflareTrustedProxies;
 use function Chevereto\Legacy\getCheveretoEnv;
 use function Chevereto\Legacy\hashFile;
+use function Chevereto\Legacy\isIpAllowed;
+use function Chevereto\Legacy\privateTrustedProxies;
 use function Chevereto\Vars\env;
 use function Chevereto\Vars\server;
 use function Safe\curl_exec;
@@ -44,6 +49,9 @@ function is_route(string $route): bool
 
 function is_route_available(string $route): bool
 {
+    if (! Handler::isValidPathSegment($route)) {
+        return false;
+    }
     $route_file = $route . '.php';
 
     return file_exists(PATH_APP_LEGACY_ROUTES . $route_file) or file_exists(PATH_APP_LEGACY_ROUTES_OVERRIDES . $route_file);
@@ -795,12 +803,59 @@ function dateinterval_to_seconds(string $duration): int
 
 function get_client_ip(): string
 {
-    $key = env()['CHEVERETO_HEADER_CLIENT_IP'];
-    $key = $key === ''
-        ? 'REMOTE_ADDR'
-        : 'HTTP_' . strtoupper(str_replace('-', '_', $key));
+    $remote = (string) (server()['REMOTE_ADDR'] ?? '');
+    $header = trim((string) (env()['CHEVERETO_HEADER_CLIENT_IP'] ?? ''));
+    if ($header === '') {
+        return $remote;
+    }
+    $key = strtoupper(str_replace('-', '_', $header));
+    if (! str_starts_with($key, 'HTTP_')) {
+        $key = 'HTTP_' . $key;
+    }
+    $isCloudflareHeader = $key === 'HTTP_CF_CONNECTING_IP';
+    $cloudflare = cloudflareTrustedProxies();
+    $trusted = clientIpTrustedProxies();
+    if ($trusted === []) {
+        $trusted = $isCloudflareHeader
+            ? $cloudflare
+            : privateTrustedProxies();
+    }
+    if (! isIpAllowed($remote, ...$trusted)) {
+        return $remote;
+    }
+    $edge = isIpAllowed($remote, ...$cloudflare);
+    $value = server()[$key] ?? '';
+    if (! is_string($value) || $value === '') {
+        return $remote;
+    }
+    $hops = explode(',', $value);
+    $ip = $remote;
+    for ($i = count($hops) - 1; $i >= 0; --$i) {
+        $ip = normalize_forwarded_ip($hops[$i]);
+        if ($ip === null) {
+            return $remote;
+        }
+        if ($edge || ! isIpAllowed($ip, ...$trusted)) {
+            return $ip;
+        }
+        $edge = isIpAllowed($ip, ...$cloudflare);
+    }
 
-    return server()[$key] ?? '';
+    return $ip;
+}
+
+function normalize_forwarded_ip(string $hop): ?string
+{
+    $ip = trim($hop);
+    if (preg_match('/^\[([^\]]+)\](?::\d+)?$/', $ip, $m)) {
+        $ip = $m[1];
+    } elseif (substr_count($ip, ':') === 1) {
+        $ip = explode(':', $ip)[0];
+    }
+
+    return filter_var($ip, FILTER_VALIDATE_IP) !== false
+        ? $ip
+        : null;
 }
 
 function get_client_languages(): array
@@ -1644,30 +1699,23 @@ function unaccent_string(string $string): string
     return $string;
 }
 
-function safe_html(mixed $var, int $flag = ENT_QUOTES | ENT_HTML5, array $skip = []): string|array|null
+function safe_html(mixed $var, int $flag = ENT_QUOTES | ENT_HTML5, array $skip = []): mixed
 {
-    if (! is_array($var)) {
-        return $var === null
-            ? null
-            : htmlspecialchars((string) $var, $flag, 'UTF-8', false);
-    }
-    $safe_array = [];
-    foreach ($var as $k => $v) {
-        if (in_array($k, $skip, true)) {
-            $safe_array[$k] = $v;
-
-            continue;
+    if (is_array($var)) {
+        $safe_array = [];
+        foreach ($var as $k => $v) {
+            $safe_array[$k] = in_array($k, $skip, true)
+                ? $v
+                : safe_html($v, $flag, $skip);
         }
-        $safe_array[$k] = is_array($v)
-            ? safe_html($v, $flag, $skip)
-            : (
-                $v === null
-                    ? null
-                    : safe_html($v, $flag, $skip)
-            );
+
+        return $safe_array;
+    }
+    if ($var === null || ! is_string($var)) {
+        return $var;
     }
 
-    return $safe_array;
+    return htmlspecialchars((string) $var, $flag, 'UTF-8');
 }
 
 function format_bytes(mixed $bytes, int $round = 1): string
@@ -1996,14 +2044,14 @@ function fetch_url(string $url, string $file = '', array $options = []): string
         $ch = curl_init();
         curlResolveCa($ch);
         curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
         curl_setopt($ch, CURLOPT_AUTOREFERER, 1);
         curl_setopt($ch, CURLOPT_TIMEOUT, PHP_SAPI === 'cli' ? 0 : 120);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 0);
+        curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
         curl_setopt($ch, CURLOPT_HEADER, 0);
         curl_setopt($ch, CURLOPT_FAILONERROR, 0);
-        curl_setopt($ch, CURLOPT_ENCODING, 'gzip');
+        curl_setopt($ch, CURLOPT_ENCODING, '');
         curl_setopt($ch, CURLOPT_VERBOSE, 0);
         if ($showProgress) {
             curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, 'Chevereto\Legacy\G\curlProgress');
@@ -2033,14 +2081,11 @@ function fetch_url(string $url, string $file = '', array $options = []): string
         }
         if (curl_errno($ch)) {
             $curl_error = curl_error($ch);
-            curl_close($ch);
 
             throw new Exception('Curl error ' . $curl_error);
         }
         if ($file == '') {
-            curl_close($ch);
-
-            return $contents;
+            return $contents ?? '';
         }
     } else {
         $context = stream_context_create([
@@ -2090,7 +2135,6 @@ function getUrlHeaders(string $url, array $options = []): array
         $return = curl_getinfo($ch);
         $return['raw'] = $raw;
     }
-    curl_close($ch);
 
     return $return;
 }
@@ -2167,24 +2211,23 @@ function is_https(string $string): bool
     return str_starts_with($string, 'https://');
 }
 
-function is_valid_url(string $string): bool
+function is_valid_url(string $url): bool
 {
-    if (! is_url($string)) {
+    if (! is_url($url)) {
         return false;
     }
-    $url = preg_replace('/^https/', 'http', $string, 1);
     if (function_exists('curl_init')) {
         $ch = curl_init();
         curlResolveCa($ch);
         curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
         curl_setopt($ch, CURLOPT_NOBODY, 1);
         curl_setopt($ch, CURLOPT_FAILONERROR, 0);
         curl_setopt($ch, CURLOPT_AUTOREFERER, 1);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 0);
+        curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
         curl_setopt($ch, CURLOPT_TIMEOUT, PHP_SAPI === 'cli' ? 0 : 120);
         $result = curl_exec($ch);
-        curl_close($ch);
 
         return $result !== false;
     } elseif ((bool) ini_get('allow_url_fopen')) {
@@ -2364,7 +2407,9 @@ function get_video_fileinfo(string $file, ?string $checksum = null): array
         );
         $format = $ffprobe->format($file);
     } catch (Throwable $e) {
-        throw new Exception('FFprobe error: ' . get_ffmpeg_error($e), 600);
+        writers()->error()->write('FFprobe error: ' . get_ffmpeg_error($e) . "\n\n");
+
+        throw new Exception('FFprobe error', 600);
     }
     if (! ($format->get('duration') > 0)) {
         throw new Exception('Invalid video file provided', 100);

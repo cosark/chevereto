@@ -11,6 +11,7 @@
 
 namespace Chevereto\Legacy\Classes;
 
+use Chevereto\Http\RequestUser;
 use LogicException;
 use PragmaRX\Google2FAQRCode\Google2FA;
 use PragmaRX\Google2FAQRCode\QRCode\Chillerlan;
@@ -104,11 +105,15 @@ class TwoFactor
         ]);
     }
 
-    public static function delete(int $userId): void
+    public static function delete(int $userId, RequestUser $requestUser): void
     {
-        DB::delete('two_factors', [
-            'user_id' => $userId,
-        ]);
+        User::assertCanEdit($userId, $requestUser);
+        DB::delete(
+            'two_factors',
+            [
+                'user_id' => $userId,
+            ]
+        );
     }
 
     public static function hasFor(int $userId): bool

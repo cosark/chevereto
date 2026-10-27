@@ -59,53 +59,11 @@ return function (Handler $handler) {
     if (! $is_dashboard_user) {
         RequestLog::getCounts('account-edit', 'fail');
     }
-    $allowed_to_edit = [
-        'name',
-        'username',
-        'email',
-        'avatar_filename',
-        'website',
-        'background_filename',
-        'timezone',
-        'language',
-        'image_keep_exif',
-        'file_meta_tag_camera_model',
-        'image_expiration',
-        'newsletter_subscribe',
-        'bio',
-        'show_nsfw_listings',
-        'is_private',
-        'status',
-    ];
-    if ($is_dashboard_user) {
-        $allowed_to_edit = array_merge($allowed_to_edit, ['is_admin', 'is_manager']);
-    }
-    if (! getSetting('enable_expirable_uploads')) {
-        $key = array_search('image_expiration', $allowed_to_edit, true);
-        unset($allowed_to_edit[$key]);
-    }
-    $user = $is_dashboard_user
-        ? User::getSingle($handler->request()[1], 'id')
-        : $logged_user;
-    if ($user === []) {
-        $handler->issueError(404);
-
-        return;
-    }
-    $is_owner = $user['id'] === Login::getUser()['id'];
-    if ($is_dashboard_user && $user['is_content_manager'] && Login::isAdmin() === false) {
-        $handler->issueError(404);
-
-        return;
-    }
-    if (in_array('language', $allowed_to_edit, true)
-        && isset($POST['language'])
-        && $logged_user['language'] !== $POST['language']
-        && $logged_user['id'] === $user['id']
-        && array_key_exists($POST['language'], L10n::getEnabledLanguages())
-    ) {
-        L10n::processTranslation($POST['language']);
-    }
+    $default_route = 'account';
+    $doing_level = $is_dashboard_user
+        ? 2
+        : 0;
+    $doing = $handler->request()[$doing_level] ?? $default_route;
     $routes = [
         'account' => _s('Account'),
         'profile' => _s('Profile'),
@@ -129,7 +87,69 @@ return function (Handler $handler) {
         'homepage' => 'fas fa-home',
         'powered-by' => 'fas fa-power-off',
     ];
-    $default_route = 'account';
+    if (isset($handler->request()[$doing_level + 1])
+        || ! array_key_exists($doing, $routes)
+    ) {
+        $handler->issueError(404);
+
+        return;
+    }
+    $allowed_to_edit = [
+        'account' => [
+            'status',
+            'username',
+            'email',
+            'image_expiration',
+            'image_keep_exif',
+            'file_meta_tag_camera_model',
+            'newsletter_subscribe',
+            'show_nsfw_listings',
+            'language',
+            'timezone',
+        ],
+        'profile' => [
+            'is_private',
+            'name',
+            'website',
+            'bio',
+        ],
+    ];
+    $allowed_to_edit = $allowed_to_edit[$doing] ?? [];
+    if ($doing === 'account'
+        && $is_dashboard_user
+        && Login::isAdmin()
+    ) {
+        $allowed_to_edit = array_merge($allowed_to_edit, ['is_admin', 'is_manager']);
+    }
+    if ($doing === 'account'
+        && ! getSetting('enable_expirable_uploads')
+    ) {
+        $key = array_search('image_expiration', $allowed_to_edit, true);
+        unset($allowed_to_edit[$key]);
+    }
+    $user = $is_dashboard_user
+        ? User::getSingle($handler->request()[1], 'id')
+        : $logged_user;
+    if ($user === []) {
+        $handler->issueError(404);
+
+        return;
+    }
+    $is_owner = $user['id'] === Login::getUser()['id'];
+    if ($is_dashboard_user && $user['is_content_manager'] && Login::isAdmin() === false) {
+        $handler->issueError(404);
+
+        return;
+    }
+    if ($doing === 'account'
+        && in_array('language', $allowed_to_edit, true)
+        && isset($POST['language'])
+        && $logged_user['language'] !== $POST['language']
+        && $logged_user['id'] === $user['id']
+        && array_key_exists($POST['language'], L10n::getEnabledLanguages())
+    ) {
+        L10n::processTranslation($POST['language']);
+    }
     $route_homepage = false;
     if (getSetting('website_mode') === 'personal'
         && getSetting('website_mode_personal_routing') !== '/'
@@ -141,6 +161,7 @@ return function (Handler $handler) {
     if ($handler::cond('content_manager') && $is_owner === false) {
         $is_email_required = false;
     }
+    $is_email_confirmation_required = $is_email_required;
     $providersEnabled = Login::getProviders('enabled');
     if ($is_email_required && getSetting('require_user_email_social_signup') === false) {
         foreach (array_keys($providersEnabled) as $k) {
@@ -150,18 +171,6 @@ return function (Handler $handler) {
                 break;
             }
         }
-    }
-    $doing_level = $is_dashboard_user ? 2 : 0;
-    $doing = $handler->request()[$doing_level] ?? $default_route;
-    if (isset($handler->request()[$doing_level + 1])
-        || ($doing != null && ! array_key_exists($doing, $routes))
-    ) {
-        $handler->issueError(404);
-
-        return;
-    }
-    if ($doing === '') { // @phpstan-ignore-line
-        $doing = $default_route;
     }
     $tabs = [];
     foreach ($routes as $route => $label) {
@@ -211,9 +220,13 @@ return function (Handler $handler) {
             }
         }
         switch ($doing) {
-            case null:
             case 'account':
-                $checkboxes = ['upload_image_exif', 'newsletter_subscribe', 'show_nsfw_listings', 'is_private'];
+                $checkboxes = [
+                    'image_keep_exif',
+                    'file_meta_tag_camera_model',
+                    'newsletter_subscribe',
+                    'show_nsfw_listings',
+                ];
                 foreach ($checkboxes as $k) {
                     if (! isset($POST[$k])) {
                         continue;
@@ -239,7 +252,10 @@ return function (Handler $handler) {
                 if (! User::isValidUsername($POST['username'])) {
                     $input_errors['username'] = _s('Invalid username');
                 }
-                if ($is_email_required and ! filter_var($POST['email'], FILTER_VALIDATE_EMAIL)) {
+                if (empty($POST['email'])
+                    ? $is_email_required
+                    : ! filter_var($POST['email'], FILTER_VALIDATE_EMAIL)
+                ) {
                     $input_errors['email'] = _s('Invalid email');
                 }
                 if (getSetting('enable_expirable_uploads')) {
@@ -316,7 +332,7 @@ return function (Handler $handler) {
                     }
                 }
                 if (! $is_error
-                    && $is_email_required
+                    && $is_email_confirmation_required
                     && ! empty($POST['email'])
                     && ! hash_equals(
                         (string) ($user['email'] ?? ''),
@@ -357,6 +373,11 @@ return function (Handler $handler) {
 
                 break;
             case 'profile':
+                if (isset($POST['is_private'])) {
+                    $POST['is_private'] = in_array($POST['is_private'], ['On', 1], false)
+                        ? 1
+                        : 0;
+                }
                 if (! preg_match('/^.{1,60}$/', $POST['name'] ?? '')) {
                     $input_errors['name'] = _s('Invalid name');
                 }
@@ -367,7 +388,7 @@ return function (Handler $handler) {
                 }
                 if (! $handler::cond('content_manager') && getSetting('akismet')) {
                     $akismet = new Akismet();
-                    $isSpam = $akismet->isSpam($POST['bio'], $POST['name'], $user['email'], $POST['website']);
+                    $isSpam = $akismet->isSpam($POST['bio'] ?? '', $POST['name'], $user['email'], $POST['website']);
                     $is_error = $isSpam;
                     $error_message = _s('Spam detected');
                 }
@@ -412,11 +433,6 @@ return function (Handler $handler) {
                 break;
 
             case 'homepage':
-                if (! array_key_exists($doing, $routes)) {
-                    $handler->issueError(404);
-
-                    return;
-                }
                 $allowed_to_edit = ['homepage_title_html', 'homepage_paragraph_html', 'homepage_cta_html'];
                 $editing_array = array_filter_array($POST, $allowed_to_edit, 'exclusion');
                 $update_settings = [];
@@ -454,7 +470,7 @@ return function (Handler $handler) {
             $is_error = true;
         }
         if (! $is_error) {
-            if (in_array($doing, [null, 'account', 'profile'], false)) {
+            if (in_array($doing, ['account', 'profile'], true)) {
                 foreach ($POST as $k => $v) {
                     if (($user[$k] ?? null) !== $v) {
                         $is_changed = true;
@@ -548,7 +564,7 @@ return function (Handler $handler) {
                 }
             }
         } else {
-            if (in_array($doing, ['', 'account'], false) && ! $is_dashboard_user) {
+            if ($doing === 'account' && ! $is_dashboard_user) {
                 RequestLog::insert([
                     'type' => 'account-edit',
                     'result' => 'fail',
@@ -615,7 +631,7 @@ return function (Handler $handler) {
         $user_list_values = [
             [
                 'label' => _s('Username'),
-                'content' => '<a href="' . $handler::var('user')['url'] . '" class="btn btn-small default"><span class="icon fas fa-user-circle"></span><span class="margin-left-5">' . $handler::var('user')['username'] . '</span></a>' . (
+                'content' => '<a href="' . $handler::var('user')['url'] . '" class="btn btn-small default"><span class="icon fas fa-user-circle"></span><span class="margin-left-5">' . $handler::var('safe_html_user')['username'] . '</span></a>' . (
                     $handler::cond('dashboard_user')
                         ? (' <a class="btn btn-small default" data-confirm="' . _s('Do you really want to delete this %s?', _n('user', 'users', 1)) . ' ' . _s("This can't be undone.") . '" data-submit-fn="CHV.fn.user.delete.submit" data-ajax-deferred="CHV.fn.complete_resource_delete" data-ajax-url="' . get_base_url('json') . '"><span class="icon fas fa-trash-alt"></span><span class="phone-hide margin-left-5">' . _s('Delete user') . '</span></a>')
                         : ''

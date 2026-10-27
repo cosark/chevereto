@@ -61,8 +61,8 @@ return function (Handler $handler) {
     }
     $page_metas = [
         'pre_doctitle' => $page['title'],
-        'meta_description' => htmlspecialchars($page['description'] ?? ''),
-        'meta_keywords' => htmlspecialchars($page['keywords'] ?? ''),
+        'meta_description' => $page['description'] ?? '',
+        'meta_keywords' => $page['keywords'] ?? '',
     ];
     foreach ($page_metas as $k => $v) {
         if ($v === null) {

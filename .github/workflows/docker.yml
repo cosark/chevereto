@@ -87,7 +87,7 @@ jobs:
       - name: Packaging
         run: |
           rm -rf .git .gitignore .github .ecs .vscode
-          rm -rf README.md chevereto.svg rector.php
+          rm -rf README.md SECURITY.md chevereto.svg rector.php
           rm -rf app/tests app/phpunit*.xml
           rm -rf app/.editions app/bin/edition
           mkdir images/_assets

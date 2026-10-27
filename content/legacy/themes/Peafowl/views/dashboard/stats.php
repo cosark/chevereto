@@ -6,6 +6,8 @@ use function Chevereto\Legacy\G\absolute_to_url;
 use function Chevereto\Legacy\G\bytes_to_mb;
 use function Chevereto\Legacy\G\get_base_url;
 use function Chevereto\Legacy\G\get_client_ip;
+use function Chevereto\Legacy\G\safe_html;
+
 use Chevereto\Legacy\G\Handler;
 use function Chevereto\Legacy\get_static_url;
 use function Chevereto\Vars\env;
@@ -16,7 +18,7 @@ if (!defined('ACCESS') || !ACCESS) {
 }
 ?>
 <div data-modal="welcome" id="modal-welcome" class="hidden">
-    <span class="modal-box-title"><i class="fas fa-hand"></i> <?php _se('Hello and welcome, %s', Login::getUser()['username']); ?></span>
+    <span class="modal-box-title"><i class="fas fa-hand"></i> <?php _se('Hello and welcome, %s', safe_html(Login::getUser()['username'])); ?></span>
     <img src="<?php echo absolute_to_url(PATH_PUBLIC_CONTENT_LEGACY_SYSTEM . 'chevereto-ultimate-remix.png') ?>" alt="" width="100%%">
     <p><?php _se("Whether you're an individual creator or a company looking for a powerful media sharing platform, Chevereto has you covered.") ?></p>
     <p><?php _se("We're always looking for ways to improve, feel free to %s and suggestions.", '<a href="mailto:rodolfo@chevereto.com" target="_blank">' . _s('share your feedback') . '</a>'); ?> <?php _se('We are available for all your support and customization needs.'); ?></p>
@@ -48,7 +50,7 @@ if (!defined('ACCESS') || !ACCESS) {
     "If the detected IP doesn't match yours it means that your web server is under a proxy. The connecting IP can be set using the HTTP header defined in the environment variable %e and when not set it fall-back to %v.",
     [
         '%v' => '<code class="code font-weight-bold">$_SERVER[\'REMOTE_ADDR\']</code>',
-        '%e' => '<code class="code font-weight-bold">CHEVERETO_HEADER_CLIENT_IP</code>',
+        '%e' => '<code class="code font-weight-bold">CHEVERETO_HEADER_CLIENT_IP</code>, <code class="code font-weight-bold">CHEVERETO_HEADER_CLIENT_IP_TRUSTED_PROXIES</code>',
     ]
 ); ?></p>
     <p><?php _se("Make sure that you address this issue as the system relies on accurate IP detections to provide basic functionalities and to protect against spam, flooding, and brute force attacks."); ?></p>

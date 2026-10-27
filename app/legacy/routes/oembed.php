@@ -44,7 +44,7 @@ return function (Handler $handler) {
         set_status_header(404);
         exit();
     }
-    $image = Image::getSingle(id: $id, pretty: true);
+    $image = Image::getById(id: $id, pretty: true);
     if ($image === []) {
         set_status_header(404);
         exit();

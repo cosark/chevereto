@@ -9697,7 +9697,7 @@ CHV.fn.album = {
         }).always(function (XHR) {
             PF.fn.loading.destroy($loading);
             if (XHR.status_code == 200) {
-                CHV.fn.fillEmbedCodes(XHR.contents, "#tab-embeds");
+                CHV.fn.fillEmbedCodes(XHR.contents, "#tab-embeds", "val", true);
                 $("#tab-embeds").addClass("visible");
                 $embed_codes.removeClass("soft-hidden");
             }
@@ -11672,10 +11672,30 @@ CHV.fn.uploader = {
 
 $.extend(CHV.fn.uploader, $.extend(true, {}, CHV.obj.uploaderReset));
 
-CHV.fn.fillEmbedCodes = function (elements, parent, fn) {
+CHV.fn.fillEmbedCodes = function (elements, parent, fn, encoded) {
     if (typeof fn == "undefined") {
         fn = "val";
     }
+    if (fn === "html") {
+        fn = "text";
+    }
+    var decoder = document.createElement("textarea");
+    var decode = function (value) {
+        value = value == null ? "" : String(value);
+        if (!encoded) {
+            return value;
+        }
+        decoder.innerHTML = value;
+        return decoder.value;
+    };
+    var encode = function (value) {
+        return value
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+    };
     var embed_tpl = CHV.fn.uploader.selectors.root == parent ? "embed_upload_tpl" : "embed_share_tpl";
     var hasFrame = false;
     var hasMedium = false;
@@ -11716,13 +11736,20 @@ CHV.fn.fillEmbedCodes = function (elements, parent, fn) {
                 if(flatten_image["type"] !== "video") {
                     template = template.replaceAll("%URL_FRAME%", "");
                 }
+                var isHtml = k.includes("html");
                 for (var i in flatten_image) {
                     if (!flatten_image.hasOwnProperty(i)) {
                         continue;
                     }
-                    template = template.replace(
-                        new RegExp("%" + i.toUpperCase() + "%", "g"),
-                        PF.fn.htmlEncode(PF.fn.htmlEncode(flatten_image[i]))
+                    var replacement = decode(flatten_image[i]).trim();
+                    if (isHtml) {
+                        replacement = encode(replacement);
+                    }
+                    template = template.replaceAll(
+                        "%" + i.toUpperCase() + "%",
+                        function () {
+                            return replacement;
+                        }
                     );
                 }
                 let useWhitespace = $embed.data("size") == "thumb" && k !== "thumb-links";
@@ -12538,27 +12565,20 @@ CHV.fn.storage = {
         "bucket",
         "server",
         "service",
-        "capacity",
+        "capacity_formatted",
         "region",
         "key",
         "secret",
         "url",
         "account_id",
         "account_name",
-        "type_chain",
-        "use_path_style_endpoint"
-    ],
-    chain: [
-        "other",
-        "document",
-        "audio",
-        "video",
-        "image",
+        "use_path_style_endpoint",
+        "is_image",
+        "is_video"
     ],
     calling: false,
     validateForm: function (parent) {
-        var id = $("[name=form-storage-id]", parent).val(),
-            submit = true;
+        var submit = true;
 
         $.each($(":input", parent), function (i, v) {
             if ($(this).is(":hidden")) {
@@ -12586,25 +12606,17 @@ CHV.fn.storage = {
         }
 
         // Validate storage capacity
-        var $storage_capacity = $("[name=form-storage-capacity]", parent),
+        var $storage_capacity = $("[name=form-storage-capacity_formatted]", parent),
             storage_capacity = $storage_capacity.val(),
             capacity_error_msg;
 
-        if ($storage_capacity.is(":visible") && (storage_capacity !== "" || storage_capacity != "0")) {
+        if ($storage_capacity.is(":visible") && storage_capacity !== "" && storage_capacity != "0") {
             if (
                 /^[\d\.]+\s*[A-Za-z]{2}$/.test(storage_capacity) == false ||
                 typeof storage_capacity.getBytes() == "undefined"
             ) {
                 capacity_error_msg = PF.fn._s(
                     "Invalid storage capacity value. Make sure to use a valid format."
-                );
-            } else if (
-                typeof CHV.obj.storages[id] !== "undefined" &&
-                storage_capacity.getBytes() < CHV.obj.storages[id].space_used
-            ) {
-                capacity_error_msg = PF.fn._s(
-                    "Storage capacity can't be lower than its current usage (%s).",
-                    CHV.obj.storages[id].space_used.formatBytes()
                 );
             }
             if (capacity_error_msg) {
@@ -12703,27 +12715,12 @@ CHV.fn.storage = {
                             }
                         });
                     } else {
-                        if (
-                            $(this).is("[name=form-storage-capacity]") &&
-                            typeof v !== "undefined" &&
-                            v > 0
-                        ) {
-                            v = String(v).formatBytes(2);
+                        if ($(this).is("[name=form-storage-capacity_formatted]")) {
+                            v = storage.capacity > 0
+                                ? String(storage.capacity).formatBytes(2)
+                                : "";
                         }
                         $(this).attr("value", v);
-                    }
-                    if(i === "form-storage-type_chain") {
-                        let chain = (parseInt(v) >>> 0)
-                            .toString(2)
-                            .paddingLeft(
-                                "0".repeat(CHV.fn.storage.chain.length)
-                            )
-                            .split("");
-                        CHV.fn.storage.chain.forEach(function(key, i) {
-                            $('#storage_type_enable_'+key)
-                                .removeAttr("checked")
-                                .attr("checked", chain[i] == 1);
-                        });
                     }
                 });
 
@@ -12757,10 +12754,6 @@ CHV.fn.storage = {
                 }
                 PF.obj.modal.form_data.editing[v] = val;
             });
-            let chain = CHV.fn.storage.chain.map(function(key) {
-                return $('#storage_type_enable_'+key, modal).prop("checked") ? 1 : 0;
-            });
-            PF.obj.modal.form_data.editing.type_chain = parseInt(chain.join(""), 2);
 
             return true;
         },
@@ -12848,10 +12841,6 @@ CHV.fn.storage = {
                 }
                 PF.obj.modal.form_data.storage[v] = val;
             });
-            let chain = CHV.fn.storage.chain.map(function(key) {
-                return $('#storage_type_enable_'+key, modal).prop("checked") ? 1 : 0;
-            });
-            PF.obj.modal.form_data.storage.type_chain = parseInt(chain.join(""), 2);
 
             return true;
         },
@@ -12867,7 +12856,7 @@ CHV.fn.storage = {
                     if (i == "is_https" || i == "is_active") {
                         var v = CHV.obj.storageTemplate.icon
                             .replace("%TITLE%", CHV.obj.storageTemplate.messages[i])
-                            .replace("%ICON%", CHV.obj.storageTemplate.checkboxes[v])
+                            .replace("%ICON%", CHV.obj.storageTemplate.checkboxes[v ? 1 : 0])
                             .replace("%PROP%", i.replace("is_", ""));
                     }
                     html = html.replace(new RegExp("%" + upper + "%", "g"), v ? v : "");
@@ -15162,7 +15151,7 @@ $(function () {
                         objects.push(aux);
                     }
                 });
-                CHV.fn.fillEmbedCodes(objects, template, "html");
+                CHV.fn.fillEmbedCodes(objects, template, "html", true);
                 PF.fn.modal.call({
                     type: "html",
                     template: CHV.fn.modal.getTemplateWithPreviews(template, $targets),

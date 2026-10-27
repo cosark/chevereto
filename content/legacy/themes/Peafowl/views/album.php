@@ -110,7 +110,7 @@ $tags = require_theme_file_return('snippets/tags_filter');
 echo $tags(Handler::var('tags_display'), Handler::var('tags_active'));
 ?>
 	<?php show_banner('album_after_header', Handler::var('listing')->sfw()); ?>
-    <div class="description-meta margin-bottom-10 hide-empty" data-text="album-description"><?php echo nl2br(trim(Handler::var('album_safe_html')['description'] ?? '')); ?></div>
+    <div class="description-meta margin-bottom-10 hide-empty" data-text="album-description"><?php echo nl2br(trim(Handler::var('safe_html_album')['description'] ?? '')); ?></div>
 </div>
 
 <div class="top-sub-bar follow-scroll margin-bottom-5">
@@ -177,7 +177,7 @@ echo $tags(Handler::var('tags_display'), Handler::var('tags_active'));
 				<div id="tab-info" class="tabbed-content padding-10<?php if (Handler::var('current_tab') === 'tab-info') {
                     echo ' visible';
                 } ?>">
-					<?php echo arr_printer(Handler::var('album_safe_html'), '<li><div class="c4 display-table-cell padding-right-10 font-weight-bold">%K</div> <div class="display-table-cell">%V</div></li>', ['<ul class="tabbed-content-list table-li">', '</ul>']); ?>
+					<?php echo arr_printer(Handler::var('safe_html_album'), '<li><div class="c4 display-table-cell padding-right-10 font-weight-bold">%K</div> <div class="display-table-cell">%V</div></li>', ['<ul class="tabbed-content-list table-li">', '</ul>']); ?>
 				</div>
 			<?php
             }

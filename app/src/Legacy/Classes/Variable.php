@@ -49,6 +49,7 @@ class Variable
             'hmac_secret_token' => 'string',
             'hmac_secret_upload' => 'string',
             'hmac_secret_api_key' => 'string',
+            'public_url' => 'string',
         ];
 
     protected static ?self $instance;
@@ -121,11 +122,15 @@ class Variable
      */
     public static function set(string $name, mixed $value): int
     {
+        if (! isset(static::$instance)) {
+            new static();
+        }
         $type = getType($value);
         $value = static::getValueAsString($type, $value);
-        if (hasEncryption() && in_array($name, static::ENCRYPTED_NAMES)) {
-            $value = encodeEncrypt($value);
-        }
+        // Persist encrypted, cache plaintext (as constructor/fetchRow do)
+        $stored = hasEncryption() && in_array($name, static::ENCRYPTED_NAMES)
+            ? encodeEncrypt($value)
+            : $value;
         $db = DB::getInstance();
         $table = DB::getTable('variables');
         $prefix = DB::getFieldPrefix('variables');
@@ -138,23 +143,28 @@ class Variable
         try {
             $db->query($sql);
             $db->bind(':name', $name);
-            $db->bind(':value', $value);
+            $db->bind(':value', $stored);
             $db->bind(':type', $type);
-            $return = $db->exec()
+            $persisted = $db->exec();
+            $return = $persisted
                 ? min(1, $db->rowCount())
                 : 0;
         } catch (PDOException $e) {
             if ($e->getCode() === '42S02') {
                 $return = (int) Settings::update(
                     [
-                        $name => $value,
+                        $name => $stored,
                     ]
                 );
+                $persisted = $return > 0;
             } else {
                 throw $e;
             }
         }
-        if ($return > 0) {
+        // Unchanged value reports 0 rows, still refresh a stale cache
+        if ($persisted
+            && (static::$variables[$name] ?? null) !== static::getTyped($value, $type)
+        ) {
             static::populate(
                 name: $name,
                 value: $value,

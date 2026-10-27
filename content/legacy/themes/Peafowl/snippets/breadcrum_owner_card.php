@@ -1,6 +1,8 @@
 <?php
 
 use function Chevereto\Legacy\G\get_global;
+use function Chevereto\Legacy\G\safe_html;
+
 use Chevereto\Legacy\G\Handler;
 
 // @phpstan-ignore-next-line
@@ -9,13 +11,14 @@ if (!defined('ACCESS') || !ACCESS) {
 } ?>
 
 <?php
-$owner = Handler::var('owner') ?? get_global("owner");
+$owner = Handler::var('owner')
+	?? get_global("owner");
 ?>
 <div class="breadcrum-item pop-btn pop-btn-auto pop-keep-click pop-btn-desktop">
 	<a aria-label="<?php _se('Avatar'); ?>" href="<?php echo $owner['url']; ?>" class="user-image">
 		<?php if (isset($owner['avatar']['url'])) {
     ?>
-		<img class="user-image" src="<?php echo $owner['avatar']['url']; ?>" alt="<?php echo $owner['username']; ?>">
+		<img class="user-image" src="<?php echo $owner['avatar']['url']; ?>" alt="<?php echo safe_html($owner['username']); ?>">
 		<?php
 } else {
         ?>

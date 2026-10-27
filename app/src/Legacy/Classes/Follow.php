@@ -21,14 +21,18 @@ class Follow
         'ip',
     ];
 
-    public static function insert(array $args = []): int|array
-    {
-        return 0;
+    public static function insert(
+        int $user_id,
+        int $followed_user_id,
+    ): array {
+        return [];
     }
 
-    public static function delete(array|string $args = []): bool|array
-    {
-        return false;
+    public static function delete(
+        int $user_id,
+        int $followed_user_id,
+    ): array {
+        return [];
     }
 
     public static function doesFollow(int $user_id, int $followed_id): bool
@@ -36,23 +40,33 @@ class Follow
         return false;
     }
 
-    public static function getFollowersCount(array $args = []): array
-    {
+    public static function getFollowersCount(
+        int $user_id,
+    ): array {
         return [];
     }
 
-    public static function getSingle(array $args = []): array
-    {
+    public static function getSingle(
+        int $user_id,
+        int $followed_user_id,
+    ): array {
         return [];
     }
 
-    public static function getAll(array $args = [], array $sort = []): array
-    {
+    public static function getAll(
+        int $user_id,
+        int $followed_user_id,
+        array $sort = []
+    ): array {
         return [];
     }
 
-    public static function get(array $args, array $sort = [], ?int $limit = null): array
-    {
+    public static function get(
+        int $user_id,
+        int $followed_user_id,
+        array $sort = [],
+        ?int $limit = null
+    ): array {
         return [];
     }
 }

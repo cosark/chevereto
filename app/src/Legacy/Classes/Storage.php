@@ -36,6 +36,7 @@ use function Chevereto\Legacy\G\is_https;
 use function Chevereto\Legacy\G\is_url;
 use function Chevereto\Legacy\G\nullify_string;
 use function Chevereto\Legacy\G\safe_html;
+use function Chevereto\Legacy\G\str_replace_last;
 use function Chevereto\Vars\env;
 use function Safe\json_encode;
 
@@ -133,7 +134,16 @@ class Storage
         foreach ($files as $k => $v) {
             $source_file = $v['file'];
             if (in_array($storage['api_type'], ['s3', 's3compatible'], true)) {
-                $source_file = @fopen($v['file'], 'r');
+                switch ($storage['api_type']) {
+                    case 'oss':
+                        $source_file = file_get_contents($v['file']);
+
+                        break;
+                    default:
+                        $source_file = @fopen($v['file'], 'r');
+
+                        break;
+                }
                 if ($source_file === false) {
                     throw new Exception('Failed to open file stream', 600);
                 }
@@ -165,6 +175,7 @@ class Storage
                     break;
 
                 case 'local':
+                    /** @var LocalStorage $API */
                     $target_path = $API instanceof LocalStorage
                         ? $API->realPath()
                         : $storage['bucket'];
@@ -399,10 +410,8 @@ class Storage
                 $values['url'] = add_ending_slash($values['url']);
             }
         }
-        self::formatValues($values, 'null');
-        if (isset($values['capacity']) && ! empty($values['capacity']) && $values['capacity'] < $storage['space_used']) {
-            throw new Exception(_s("Storage capacity can't be lower than its current usage (%s).", format_bytes($storage['space_used'])), 101);
-        }
+        $chainMask = ($storage['is_image'] ? 1 : 0) | ($storage['is_video'] ? 2 : 0);
+        self::formatValues($values, $chainMask, 'null');
         $new_values = array_merge($storage, $values);
         if ($checkCredentials) {
             $isTestCredentials = intval($values['is_active'] ?? 0) === 1;
@@ -437,7 +446,8 @@ class Storage
 
     public static function requireAPI(array $storage): object
     {
-        $api_type = StorageApis::getApiType((int) $storage['api_id']);
+        $apiId = (int) $storage['api_id'];
+        $api_type = StorageApis::getApiType($apiId);
         switch ($api_type) {
             case 's3':
             case 's3compatible':
@@ -459,6 +469,9 @@ class Storage
                 ];
                 if ($api_type === 's3compatible') {
                     $clientConfig['endpoint'] = $storage['server'];
+                    if (str_contains($storage['server'], '.r2.cloudflarestorage.com')) {
+                        $clientConfig['endpoint'] = str_replace_last('/' . $storage['bucket'], '', $storage['server']);
+                    }
                     $clientConfig['request_checksum_calculation'] = 'WHEN_REQUIRED';
                     $clientConfig['response_checksum_validation'] = 'WHEN_REQUIRED';
                 }
@@ -497,7 +510,7 @@ class Storage
                 'sa-east-1' => 'South America (Sao Paulo)',
             ],
         ];
-        foreach ($regions['s3'] as &$v) {
+        foreach ($regions['s3'] as $k => &$v) {
             $v = [
                 'name' => $v,
                 'url' => '',
@@ -573,44 +586,53 @@ class Storage
             : self::getStorageValidFilename($filename, $storage_id, $filenaming, $destination);
     }
 
-    public static function regenStorageStats(int $storageId): string
+    public static function statsRebuild(int $id): int
     {
-        $storage = self::getSingle($storageId);
+        $storage = self::getSingle($id);
         if ($storage === []) {
-            throw new Exception(sprintf("Error: Storage id %s doesn't exists", $storageId), 100);
+            throw new Exception(sprintf("Storage id %s doesn't exists", $id), 404);
         }
-        $query = 'UPDATE ' . DB::getTable('storages') . ' SET storage_space_used = (SELECT IFNULL(SUM(image_size) + SUM(image_thumb_size) + SUM(image_medium_size),0) FROM ' . DB::getTable('images') . ' WHERE image_storage_id = :storageId) WHERE storage_id = :storageId';
+        $tableStorages = DB::getTable('storages');
+        $tableImages = DB::getTable('images');
+        $query = <<<SQL
+        UPDATE {$tableStorages}
+        SET storage_space_used = (SELECT IFNULL(SUM(image_size) + SUM(image_thumb_size) + SUM(image_medium_size),0)
+        FROM {$tableImages} WHERE image_storage_id = :storageId)
+        WHERE storage_id = :storageId;
+        SQL;
         $db = DB::getInstance();
         $db->query($query);
-        if ($storageId !== 0) {
-            $db->bind(':storageId', $storageId);
-        }
+        $db->bind(':storageId', $id);
+        $db->exec();
+        $db->query(
+            <<<SQL
+            SELECT storage_space_used
+            FROM {$tableStorages}
+            WHERE storage_id = :storageId
+            SQL,
+        );
+        $db->bind(':storageId', $id);
         $db->exec();
 
-        return sprintf(
-            'Storage %s stats re-generated',
-            $storageId != 0
-                ? ('"' . $storage['name'] . '" (' . $storage['id'] . ')')
-                : 'local'
-        );
+        return (int) $db->fetchColumn();
     }
 
-    public static function migrateStorage(int $sourceStorageId, int $targetStorageId): string
+    public static function migrateStorage(int $sourceId, int $targetId): string
     {
-        if ($sourceStorageId === $targetStorageId) {
-            throw new Exception(sprintf('You have to provide two different storage ids (same id %s provided)', $sourceStorageId), 100);
+        if ($sourceId === $targetId) {
+            throw new Exception(sprintf('You have to provide two different storage ids (same id %s provided)', $sourceId), 100);
         }
-        $sourceStorage = $sourceStorageId === 0
+        $sourceStorage = $sourceId === 0
             ? 'local'
-            : self::getSingle($sourceStorageId);
-        $targetStorage = $targetStorageId === 0
+            : self::getSingle($sourceId);
+        $targetStorage = $targetId === 0
             ? 'local'
-            : self::getSingle($targetStorageId);
+            : self::getSingle($targetId);
         $error_message = ["Storage id %s doesn't exists", "Storage ids %s doesn't exists"];
         $error = [];
         foreach (['source', 'target'] as $v) {
             $prop = $v . 'Storage';
-            $id = $prop . 'Id';
+            $id = $v . 'Id';
             if (${$prop} == false) {
                 $error[] = ${$id};
             } elseif (is_array(${$prop}) === false) {
@@ -627,26 +649,28 @@ class Storage
         $db = DB::getInstance();
         $query = 'UPDATE ' . DB::getTable('images') . ' SET image_storage_id = :targetStorageId WHERE ';
         // local (null) -> external
-        if ($sourceStorageId === 0) {
+        if ($sourceId === 0) {
             $query .= 'ISNULL(image_storage_id)';
             // external -> external
         } else {
             $query .= 'image_storage_id = :sourceStorageId';
         }
         $db->query($query);
-        if ($sourceStorageId !== 0) {
-            $db->bind(':sourceStorageId', $sourceStorageId);
+        if ($sourceId !== 0) {
+            $db->bind(':sourceStorageId', $sourceId);
         }
-        $db->bind(':targetStorageId', $targetStorageId === 0 ? null : $targetStorageId);
+        $db->bind(':targetStorageId', $targetId === 0 ? null : $targetId);
         $db->exec();
         $rowCount = $db->rowCount();
         if ($rowCount > 0) {
             $return = [];
-            if ($sourceStorageId !== 0) {
-                $return[] = static::regenStorageStats($sourceStorageId);
+            if ($sourceId !== 0) {
+                static::statsRebuild($sourceId);
+                $return[] = sprintf('Storage "%s" (%s) stats re-generated', $sourceStorage['name'], $sourceId);
             }
-            if ($targetStorageId !== 0) {
-                $return[] = static::regenStorageStats($targetStorageId);
+            if ($targetId !== 0) {
+                static::statsRebuild($targetId);
+                $return[] = sprintf('Storage "%s" (%s) stats re-generated', $targetStorage['name'], $targetId);
             }
             array_unshift($return, strtr('OK: %s image(s) migrated from "%source" to "%target"', [
                 '%s' => $rowCount,
@@ -714,12 +738,12 @@ class Storage
     protected static function updateStorageVariables(): void
     {
         $table = DB::getTable('storages');
-        $activeSQL = <<<MySQL
+        $activeSQL = <<<SQL
         SELECT COUNT(*) count FROM `{$table}` WHERE storage_is_active=1 AND storage_deleted_at IS NULL;
-        MySQL;
-        $allSQL = <<<MySQL
+        SQL;
+        $allSQL = <<<SQL
         SELECT COUNT(*) count FROM `{$table}` WHERE storage_deleted_at IS NULL;
-        MySQL;
+        SQL;
         $activeStorage = (int) (DB::queryFetchSingle($activeSQL)['count'] ?? 0);
         $allStorage = (int) (DB::queryFetchSingle($allSQL)['count'] ?? 0);
         Variable::set('storages_active', $activeStorage);
@@ -740,16 +764,29 @@ class Storage
         return $required;
     }
 
-    protected static function formatValues(array &$values, string $junk = 'keep'): void
+    protected static function formatValues(array &$values, int $chainMask = 0, string $junk = 'keep'): void
     {
-        if (isset($values['capacity'])) {
-            nullify_string($values['capacity']);
-            if ($values['capacity'] != null) {
-                $values['capacity'] = get_bytes($values['capacity']);
+        $values['is_image'] ??= ($chainMask & 1) !== 0;
+        $values['is_video'] ??= ($chainMask & 2) !== 0;
+        $chainMask = 0;
+        if ((bool) $values['is_image']) {
+            $chainMask |= 1;
+        }
+        if ((bool) $values['is_video']) {
+            $chainMask |= 2;
+        }
+        $values['type_chain'] = $chainMask;
+        unset($values['is_image'], $values['is_video']);
+        if (array_key_exists('capacity_formatted', $values)) {
+            nullify_string($values['capacity_formatted']);
+            $values['capacity'] = null;
+            if ($values['capacity_formatted'] != null) {
+                $values['capacity'] = get_bytes($values['capacity_formatted']);
                 if (! is_numeric($values['capacity'])) {
                     throw new Exception('Invalid storage capacity value. Make sure to use a valid format.', 100);
                 }
             }
+            unset($values['capacity_formatted']);
         }
         if (isset($values['is_https'])) {
             $protocol_stock = ['http', 'https'];
@@ -760,6 +797,13 @@ class Storage
             $values['url'] = $protocol_stock[1] . '://' . $values['url'];
         } elseif (isset($values['url'])) {
             $values['is_https'] = (int) is_https($values['url']);
+        }
+
+        if (isset($values['api_id'])
+            && in_array(StorageApis::getApiType((int) $values['api_id']), ['ftp', 'sftp'], true)
+            && isset($values['bucket'])
+        ) {
+            $values['bucket'] = add_ending_slash($values['bucket']);
         }
 
         if (in_array($junk, ['null', 'remove'], true)
@@ -784,6 +828,9 @@ class Storage
                 }
             }
         }
+        if (isset($values['server'], $values['bucket'])) {
+            $values['server'] = static::fixCloudFlareAPIUrl($values['server'], $values['bucket']);
+        }
     }
 
     protected static function formatRowValues(array &$values, array $row = []): void
@@ -793,7 +840,7 @@ class Storage
         $values['url'] = is_url($values['url'])
             ? add_ending_slash($values['url'])
             : null;
-        $capacity = format_bytes($values['capacity'], 0);
+        $capacity = format_bytes($values['capacity'], 2);
         $used = format_bytes($values['space_used'], 2);
         $values['usage_label'] = ($values['capacity'] === 0 ? _s('Unlimited') : $capacity)
             . ' / '
@@ -803,5 +850,27 @@ class Storage
         if (hasEncryption()) {
             $values = decryptValues(self::ENCRYPTED_NAMES, $values);
         }
+        $values['is_image'] = ($values['type_chain'] & 1) !== 0;
+        $values['is_video'] = ($values['type_chain'] & 2) !== 0;
+        $values['use_path_style_endpoint'] = (bool) $values['use_path_style_endpoint'];
+        $values['is_https'] = (bool) $values['is_https'];
+        $values['is_active'] = (bool) $values['is_active'];
+        unset($values['type_chain']);
+        $values['capacity_formatted'] = $capacity;
+        $values['space_used_readable'] = $used;
+        // $values['api'] = [
+        //     'id' => $values['api_id'] ?? null,
+        //     'name' => $values['api_name'] ?? null,
+        //     'type' => $values['api_type'] ?? null,
+        // ];
+    }
+
+    private static function fixCloudFlareAPIUrl(string $server, string $bucket): string
+    {
+        if (str_contains($server, '.r2.cloudflarestorage.com')) {
+            return str_replace_last('/' . $bucket, '', $server);
+        }
+
+        return $server;
     }
 }

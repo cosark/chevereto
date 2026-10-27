@@ -261,7 +261,7 @@ class DB
      */
     public static function preparedQueryExecute(string $query, array $binds): int
     {
-        $db = self::dbPrepare($query, $binds);
+        $db = self::prepare($query, $binds);
 
         return $db->exec() ? $db->rowCount() : 0;
     }
@@ -340,6 +340,11 @@ class DB
             throw new Exception('Expecting array values, ' . gettype($where) . ' given');
         }
         self::validateClause($clause, __METHOD__);
+        if (is_array($where)) {
+            self::assertIdentifiers(...array_keys($where));
+        }
+        self::assertIdentifiers(...$columns);
+        self::assertOperators(...array_values($valuesOperators));
         if (is_array($table)) {
             $join = $table['join'];
             $table = $table['table'];
@@ -374,6 +379,10 @@ class DB
             if (! $sort['order']) {
                 $sort['order'] = 'desc';
             }
+            self::assertIdentifiers($sort['field']);
+            if (! in_array(strtoupper($sort['order']), ['ASC', 'DESC'], true)) {
+                throw new LogicException('Invalid sort order');
+            }
             $query .= ' ORDER BY ' . $sort['field'] . ' ' . strtoupper($sort['order']) . ' ';
         }
         if ($limit && is_int($limit)) {
@@ -403,6 +412,7 @@ class DB
         $values = self::getPrefixedValues($prefix, $values);
         $wheres = self::getPrefixedValues($prefix, $wheres);
         self::validateClause($clause, __METHOD__);
+        self::assertIdentifiers(...array_keys($values), ...array_keys($wheres));
         $table = self::getTable($table);
         $query = 'UPDATE `' . $table . '` SET ';
         foreach (array_keys($values) as $k) {
@@ -446,6 +456,7 @@ class DB
     {
         $prefix = self::getFieldPrefix($table);
         $values = self::getPrefixedValues($prefix, $values);
+        self::assertIdentifiers(...array_keys($values));
         $table = self::getTable($table);
         $table_fields = [];
         $table_fields = array_keys($values);
@@ -472,6 +483,8 @@ class DB
         $prefix = self::getFieldPrefix($table);
         $values = self::getPrefixedValues($prefix, $values);
         $wheres = self::getPrefixedValues($prefix, $wheres);
+        self::validateClause($clause, __METHOD__);
+        self::assertIdentifiers(...array_keys($values), ...array_keys($wheres));
         $table = self::getTable($table);
         $query = 'UPDATE `' . $table . '` SET ';
         foreach ($values as $k => $v) {
@@ -509,6 +522,7 @@ class DB
         $prefix = self::getFieldPrefix($table);
         $values = self::getPrefixedValues($prefix, $values);
         self::validateClause($clause, __METHOD__);
+        self::assertIdentifiers(...array_keys($values));
         $table = self::getTable($table);
         $query = 'DELETE FROM `' . $table . '` WHERE ';
         foreach (array_keys($values) as $k) {
@@ -531,7 +545,7 @@ class DB
         ]);
     }
 
-    public static function dbPrepare(string $query, array $values = []): self
+    public static function prepare(string $query, array $values = []): self
     {
         $query = self::getQueryWithTablePrefix($query);
         $db = self::getInstance();
@@ -545,7 +559,7 @@ class DB
 
     public static function fetchSingleQuery(string $query, array $binds, int $mode = PDO::FETCH_ASSOC): array
     {
-        $db = self::dbPrepare($query, $binds);
+        $db = self::prepare($query, $binds);
         $fetch = $db->fetchSingle($mode);
 
         return $fetch ?: [];
@@ -553,7 +567,7 @@ class DB
 
     public static function fetchAllQuery(string $query, array $binds, int $mode = PDO::FETCH_ASSOC): array
     {
-        $db = self::dbPrepare($query, $binds);
+        $db = self::prepare($query, $binds);
 
         return $db->fetchAll($mode) ?: [];
     }
@@ -730,6 +744,36 @@ class DB
         }
 
         return $sort;
+    }
+
+    private static function assertIdentifiers(string|int ...$identifiers): void
+    {
+        foreach ($identifiers as $identifier) {
+            if (! preg_match('/^[A-Za-z0-9_]{1,64}$/', (string) $identifier)) {
+                throw new LogicException('Invalid column name');
+            }
+        }
+    }
+
+    private static function assertOperators(string ...$operators): void
+    {
+        foreach ($operators as $operator) {
+            if (! in_array(strtoupper(trim($operator)), [
+                '&',
+                'IS',
+                '=',
+                '!=',
+                '<>',
+                '<',
+                '>',
+                '<=',
+                '>=',
+                'LIKE',
+                'NOT LIKE',
+            ], true)) {
+                throw new LogicException('Invalid operator');
+            }
+        }
     }
 
     private static function validateClause(string $clause, string|null $method = null)

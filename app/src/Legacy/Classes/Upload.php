@@ -11,7 +11,7 @@
 
 namespace Chevereto\Legacy\Classes;
 
-use Chevereto\Config\Config;
+use Chevereto\Url\UrlValidate;
 use Exception;
 use Intervention\Image\ImageManagerStatic;
 use LogicException;
@@ -34,12 +34,14 @@ use function Chevereto\Legacy\G\get_client_ip;
 use function Chevereto\Legacy\G\get_file_extension;
 use function Chevereto\Legacy\G\get_filename;
 use function Chevereto\Legacy\G\get_image_fileinfo;
+use function Chevereto\Legacy\G\get_mimetype;
 use function Chevereto\Legacy\G\get_public_url;
 use function Chevereto\Legacy\G\get_video_fileinfo;
 use function Chevereto\Legacy\G\is_animated_webp;
 use function Chevereto\Legacy\G\is_image_url;
 use function Chevereto\Legacy\G\is_url;
 use function Chevereto\Legacy\G\is_writable;
+use function Chevereto\Legacy\G\mime_to_extension;
 use function Chevereto\Legacy\G\name_unique_file;
 use function Chevereto\Legacy\G\unlinkIfExists;
 use function Chevereto\Legacy\getSetting;
@@ -51,10 +53,13 @@ use function Chevereto\Vars\sessionVar;
 
 class Upload
 {
-    public const URL_SCHEMES = [
-        'http',
-        'https',
-        'ftp',
+    public const AVAILABLE_TYPES = [
+        // 0 => 'all',
+        1 => 'image',       // 2^0
+        2 => 'video',       // 2^1
+        // 4 => 'audio',    // 2^2
+        // 8 => 'document', // 2^3
+        // 16 => 'other',   // 2^4
     ];
 
     public bool $detectFlood = true;
@@ -103,6 +108,10 @@ class Upload
 
     private ?string $checksum = null;
 
+    private UrlValidate $urlValidate;
+
+    private bool $isFiles = true;
+
     public function uploaded(): array
     {
         return $this->uploaded;
@@ -113,42 +122,14 @@ class Upload
         return $this->source;
     }
 
+    public function setIsFiles(bool $isFiles): void
+    {
+        $this->isFiles = $isFiles;
+    }
+
     public function moderation(): ?object
     {
         return $this->moderation;
-    }
-
-    public function checkValidUrl(string $url): void
-    {
-        $aux = strtolower($url);
-        $scheme = parse_url($aux, PHP_URL_SCHEME);
-        if (! in_array($scheme, self::URL_SCHEMES, true)) {
-            throw new LogicException(
-                message(
-                    'Unsupported URL scheme `%scheme%`',
-                    scheme: $scheme
-                ),
-                400
-            );
-        }
-        $host = parse_url($aux, PHP_URL_HOST);
-        if (parse_url(Config::host()->hostname(), PHP_URL_HOST) === $host) {
-            throw new LogicException(
-                message('Unsupported self host URL upload'),
-                400
-            );
-        }
-        $ip = gethostbyname($host);
-        $typePub = \IPLib\Range\Type::getName(\IPLib\Range\Type::T_PUBLIC);
-        $address = \IPLib\Factory::parseAddressString($ip);
-        $type = $address->getRangeType();
-        $typeName = \IPLib\Range\Type::getName($type);
-        if ($typeName !== $typePub) {
-            throw new LogicException(
-                message('Unsupported non-public IP address for upload'),
-                400
-            );
-        }
     }
 
     public function setSource(array|string $source): void
@@ -171,7 +152,7 @@ class Upload
                     403
                 );
             }
-            $this->checkValidUrl($this->source);
+            $this->urlValidate = new UrlValidate($this->source);
         }
     }
 
@@ -395,18 +376,6 @@ class Upload
         return explode(',', Settings::UPLOAD_AVAILABLE_IMAGE_FORMATS);
     }
 
-    public static function getAvailableTypes(): array
-    {
-        // 0: all
-        return [
-            'image', // 2^0
-            'video', // 2^1
-            // 'audio', // 2^2
-            // 'document', // 2^3
-            // 'other' // 2^4
-        ];
-    }
-
     public static function getTempNam(string $failoverDir = '', string $suffix = ''): string
     {
         if ($failoverDir === '') {
@@ -509,7 +478,6 @@ class Upload
 
     protected function fetchSource(): void
     {
-        $this->downstream = static::getTempNam($this->destination);
         if ($this->type === 'file') {
             if ($this->source['error'] !== UPLOAD_ERR_OK) {
                 switch ($this->source['error']) {
@@ -550,6 +518,12 @@ class Upload
                         );
                 }
             }
+            if ($this->isFiles
+                && ! is_uploaded_file($this->source['tmp_name'])
+            ) {
+                throw new Exception('Invalid source for file upload', 600);
+            }
+            $this->downstream = static::getTempNam($this->destination);
 
             try {
                 $renamed = rename($this->source['tmp_name'], $this->downstream);
@@ -560,7 +534,12 @@ class Upload
                 throw new Exception('Unable to rename tmp_name to downstream', 622);
             }
         } elseif ($this->type === 'url') {
-            fetch_url($this->source, $this->downstream);
+            $this->downstream = static::getTempNam($this->destination);
+            fetch_url(
+                $this->source,
+                $this->downstream,
+                $this->urlValidate->getCurlOptions()
+            );
         }
         $this->source_filename = basename($this->type === 'file' ? $this->source['name'] : $this->source);
     }
@@ -570,14 +549,30 @@ class Upload
         if (! file_exists($this->downstream)) {
             throw new Exception("Can't fetch target upload source (downstream)", 600);
         }
-        $this->mediaType = str_starts_with($this->source['type'] ?? 'image/', 'video/')
+        $mimetype = get_mimetype($this->downstream);
+        $this->mediaType = str_starts_with($mimetype, 'video/')
             ? 'video'
             : 'image';
+        if (! $this->options['max_size']) {
+            $this->options['max_size'] = self::getDefaultOptions()['max_size'];
+        }
+        if ($this->mediaType === 'video') {
+            $extension = mime_to_extension($mimetype);
+            if (! $this->isValidVideoMime($mimetype)) {
+                throw new Exception('Invalid mimetype', 612);
+            }
+            if (! in_array($extension, $this->options['allowed_formats'], true)) {
+                throw new Exception(sprintf('Disabled image format (%s)', $extension), 614);
+            }
+            if (filesize($this->downstream) > $this->options['max_size']) {
+                throw new Exception('File too big - max ' . format_bytes($this->options['max_size']), 400);
+            }
+        }
         $this->source_image_fileinfo = $this->mediaType === 'video'
             ? get_video_fileinfo($this->downstream, $this->checksum)
             : get_image_fileinfo($this->downstream, $this->checksum);
         if ($this->source_image_fileinfo === []) {
-            throw new Exception("Can't get target upload source info", 610);
+            throw new Exception("Can't get uploaded file info", 610);
         }
         if ($this->source_image_fileinfo['width'] === ''
             || $this->source_image_fileinfo['height'] === ''
@@ -592,9 +587,6 @@ class Upload
         }
         if (! $this->isValidMime($this->source_image_fileinfo['mime'])) {
             throw new Exception('Invalid mimetype', 612);
-        }
-        if (! $this->options['max_size']) {
-            $this->options['max_size'] = self::getDefaultOptions()['max_size'];
         }
         if ($this->source_image_fileinfo['size'] > $this->options['max_size']) {
             throw new Exception('File too big - max ' . format_bytes($this->options['max_size']), 400);
@@ -658,20 +650,24 @@ class Upload
         }
 
         try {
-            $db = DB::getInstance();
-            $flood_db = $db->queryFetchSingle(
-                'SELECT
-				COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MINUTE), 1, NULL)) AS minute,
-				COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR), 1, NULL)) AS hour,
-				COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY), 1, NULL)) AS day,
-				COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 WEEK), 1, NULL)) AS week,
-				COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH), 1, NULL)) AS month
-			FROM ' . DB::getTable('images') . " WHERE image_uploader_ip='" . get_client_ip() . "' AND image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH)"
-            );
+            $query = <<<SQL
+            SELECT
+                COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MINUTE), 1, NULL)) AS minute,
+                COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR), 1, NULL)) AS hour,
+                COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY), 1, NULL)) AS day,
+                COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 WEEK), 1, NULL)) AS week,
+                COUNT(IF(image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH), 1, NULL)) AS month
+            FROM `%table_prefix%images`
+            WHERE image_uploader_ip = :ip
+                AND image_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH);
+            SQL;
+            $flood_db = DB::fetchSingleQuery($query, [
+                ':ip' => get_client_ip(),
+            ]);
         } catch (Exception) {
             $flood_db = [];
-        } // Silence
-        if ($flood_db === false) {
+        }
+        if ($flood_db === []) {
             return [];
         }
         $is_flood = false;

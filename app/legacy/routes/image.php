@@ -62,7 +62,7 @@ return function (Handler $handler) {
     }
     $logged_user = Login::getUser();
     User::statusRedirect($logged_user['status'] ?? null);
-    $image = Image::getSingle(
+    $image = Image::getById(
         $id,
         ! in_array($id, session()['image_view_stock']),
         true,
@@ -154,7 +154,7 @@ return function (Handler $handler) {
     }
     $is_album_cover = false;
     if (isset($image['album']['id'])) {
-        $album = Album::getSingle((int) $image['album']['id']);
+        $album = Album::getById((int) $image['album']['id']);
         $is_album_cover = ($album['cover_id'] ?? 0) == $image['id'];
         $get_album_slice = Image::getAlbumSlice((int) $image['id'], (int) $image['album']['id'], 2);
         $image_album_slice = array_merge($image['album'], $get_album_slice);
@@ -285,7 +285,7 @@ return function (Handler $handler) {
     $handler::setVar('pre_doctitle', $pre_doctitle);
     $handler::setVar('image', $image);
     $handler::setVar('image_safe_html', $image_safe_html);
-    $handler::setVar('image_album_slice', safe_html($image_album_slice ?? []));
+    $handler::setVar('image_album_slice', safe_html($image_album_slice ?? [], skip: ['prev', 'next', 'images']));
     $handler::setVar('tabs', $tabs);
     $handler::setVar('owner', $image['user'] ?? []);
     if (isset($image['description'])) {
@@ -323,8 +323,11 @@ return function (Handler $handler) {
     require_theme_file('snippets/embed');
     $embed_share_tpl = get_global('embed_share_tpl');
     $sharing = [];
+    $sharingHtml = [];
     foreach (flatten_array($image) as $imageKey => $imageValue) {
-        $sharing['%' . strtoupper($imageKey) . '%'] = $imageValue;
+        $key = '%' . strtoupper($imageKey) . '%';
+        $sharing[$key] = $imageValue;
+        $sharingHtml[$key] = safe_html($imageValue);
     }
     $embed = [];
     $hasSizes = [
@@ -345,13 +348,14 @@ return function (Handler $handler) {
             if (is_array($value)) {
                 $value = $value[$image['type']];
             }
-            $value = strtr($value, $sharing);
+            $value = strtr(
+                $value,
+                str_contains($option, 'html') ? $sharingHtml : $sharing
+            );
             if ($value === '') {
                 continue;
             }
-            if (str_contains($option, 'html')) {
-                $value = htmlentities($value);
-            }
+            $value = htmlentities($value);
             $label = $optionValue['label'];
             $label = str_ireplace($groupLabel, '', $label);
             $label = ucfirst(trim($label));

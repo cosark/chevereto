@@ -13,6 +13,7 @@ use Chevereto\Legacy\Classes\HybridauthSession;
 use Chevereto\Legacy\Classes\L10n;
 use Chevereto\Legacy\Classes\Login;
 use Chevereto\Legacy\Classes\Settings;
+use Chevereto\Legacy\Classes\TwoFactor;
 use Chevereto\Legacy\Classes\User;
 use Chevereto\Legacy\G\Handler;
 use Hybridauth\Exception\InvalidAuthorizationStateException;
@@ -22,6 +23,7 @@ use function Chevereto\Legacy\cheveretoVersionInstalled;
 use function Chevereto\Legacy\G\get_public_url;
 use function Chevereto\Legacy\G\redirect;
 use function Chevereto\Legacy\getSetting;
+use function Chevereto\Vars\sessionVar;
 
 return function (Handler $handler) {
     if (! version_compare(cheveretoVersionInstalled(), '4.0.0-beta.11', '>=')) {
@@ -150,7 +152,12 @@ return function (Handler $handler) {
         } else {
             Login::insertConnection($doing, $values);
         }
-        Login::insertCookie('cookie_' . $doing, $user['id']);
+        $cookieType = 'cookie_' . $doing;
+        if (TwoFactor::hasFor((int) $user['id'])) {
+            sessionVar()->put('challenge_two_factor_cookie', $cookieType);
+        } else {
+            Login::insertCookie($cookieType, $user['id']);
+        }
         $adapter->disconnect();
 
         // if (isset($connectProfile->photoURL) && !isset($user['avatar']['filename'])) {

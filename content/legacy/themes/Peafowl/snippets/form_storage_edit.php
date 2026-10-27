@@ -185,8 +185,8 @@ foreach (StorageApis::getEnabled() as $k => $v) {
 	</div>
 	<div class="input-label">
 		<div class="c8">
-			<label for="form-storage-capacity"><?php _se('Storage capacity'); ?></label>
-			<input type="text" id="form-storage-capacity" name="form-storage-capacity" class="text-input" placeholder="<?php _se('Example: 20 GB, 1 TB, etc.'); ?>">
+			<label for="form-storage-capacity_formatted"><?php _se('Storage capacity'); ?></label>
+			<input type="text" id="form-storage-capacity_formatted" name="form-storage-capacity_formatted" class="text-input" placeholder="<?php _se('Example: 20 GB, 1 TB, etc.'); ?>">
 		</div>
 		<div class="input-below"><?php _se('This storage will be disabled when it reach this capacity. Leave it blank or zero for no limit.'); ?></div>
 	</div>
@@ -200,8 +200,8 @@ foreach (StorageApis::getEnabled() as $k => $v) {
 		<div class="checkbox-label">
 			<ul class="c20 phablet-c1">
 			<?php
-                foreach (Upload::getAvailableTypes() as $k) {
-                    echo strtr('<li class="c5 display-inline-block margin-right-10"><label class="display-block" for="storage_type_enable_%k" %tip> <input type="checkbox" name="storage_type_enable_%k" id="storage_type_enable_%k" value="%k" %checked %disabled>%K</label></li>', [
+                foreach (Upload::AVAILABLE_TYPES as $k) {
+                    echo strtr('<li class="c5 display-inline-block margin-right-10"><label class="display-block" for="form-storage-is_%k" %tip> <input type="checkbox" name="form-storage-is_%k" id="form-storage-is_%k" value="%k" %checked %disabled>%K</label></li>', [
                         '%k' => $k,
                         '%K' => ucfirst($k),
                         '%checked' => 'checked data-checked="1"',

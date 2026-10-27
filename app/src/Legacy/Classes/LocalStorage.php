@@ -42,7 +42,7 @@ class LocalStorage
     {
         if (is_writable($this->realPath) === false) {
             throw new Exception(
-                sprintf('Path %s is not writable', $this->realPath),
+                sprintf('Path `%s` is not writable', $this->realPath),
                 600
             );
         }
@@ -86,7 +86,10 @@ class LocalStorage
             return;
         }
         if (unlinkIfExists($filename) == false) {
-            throw new Exception("Can't delete file '{$filename}'", 600);
+            throw new Exception(
+                sprintf("Can't delete file `%s`", $filename),
+                600
+            );
         }
         clearstatcache();
     }
@@ -117,12 +120,21 @@ class LocalStorage
         chmod($dirname, $path_perms);
         umask($old_umask);
         if (! $make_pathname) {
-            throw new Exception('$dirname ' . $dirname . ' is not a dir', 630);
+            throw new Exception(
+                sprintf('`%s` is not a dir', $dirname),
+                630
+            );
         }
     }
 
     protected function getWorkingPath(string $dirname): string
     {
+        if (preg_match('#(^|[\\\\/])\.\.([\\\\/]|$)#', $dirname)) {
+            throw new Exception(
+                sprintf('Invalid path: `%s`', $dirname),
+                600
+            );
+        }
         if (starts_with('/', $dirname) == false) { // relative thing
             return $this->realPath . $dirname;
         }

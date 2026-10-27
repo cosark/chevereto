@@ -34,7 +34,7 @@ return function (Handler $handler) {
     $album = null;
     if (isset(get()['toAlbum'])) {
         $toAlbumId = decodeID(get()['toAlbum']);
-        $album = Album::getSingle(id: $toAlbumId, requester: $logged_user);
+        $album = Album::getById(id: $toAlbumId, requester: $logged_user);
         $is_owner = isset($album['user']['id']) && $album['user']['id'] == $logged_user['id'];
         if (! $is_owner) {
             $album = [];

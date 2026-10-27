@@ -34,6 +34,7 @@ use stdClass;
 use Throwable;
 use ZipArchive;
 use function Chevere\Filesystem\directoryForPath;
+use function Chevereto\Legacy\G\curlResolveCa;
 use function Chevereto\Legacy\getCheveretoEnv;
 
 require_once __DIR__ . '/legacy/load/php-boot.php';
@@ -249,11 +250,13 @@ function logger(string $message): void
 function curl(string $url, array $curlOpts = []): object
 {
     $ch = curl_init();
+    curlResolveCa($ch);
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($ch, CURLOPT_AUTOREFERER, 1);
     curl_setopt($ch, CURLOPT_TIMEOUT, 60);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+    curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+    curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
     curl_setopt($ch, CURLOPT_HEADER, 0);
     curl_setopt($ch, CURLOPT_FAILONERROR, 0);
     curl_setopt($ch, CURLOPT_VERBOSE, 0);
@@ -269,11 +272,9 @@ function curl(string $url, array $curlOpts = []): object
     $transfer = curl_getinfo($ch);
     if (curl_errno($ch)) {
         $curl_error = curl_error($ch);
-        curl_close($ch);
 
         throw new Exception('Curl error ' . $curl_error, 500);
     }
-    curl_close($ch);
     $return = new stdClass();
     if (is_resource($fp)) {
         rewind($fp);
@@ -338,6 +339,7 @@ function downloadFile(string $url, array $params, string $filePath, bool $post =
     }
     $ops = [
         CURLOPT_FILE => $fp,
+        CURLOPT_FOLLOWLOCATION => 1,
     ];
     if ($params !== []) {
         $ops[CURLOPT_POSTFIELDS] = http_build_query($params);

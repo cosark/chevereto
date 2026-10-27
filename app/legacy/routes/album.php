@@ -77,7 +77,7 @@ return function (Handler $handler) {
     if (! isset(session()['album_view_stock'])) {
         sessionVar()->put('album_view_stock', []);
     }
-    $album = Album::getSingle(
+    $album = Album::getById(
         id: $id,
         sumView: ! in_array($id, session()['album_view_stock']),
         requester: $logged_user
@@ -358,7 +358,7 @@ return function (Handler $handler) {
     $handler::setVars([
         'pre_doctitle' => strip_tags($album['name']),
         'album' => $album,
-        'album_safe_html' => $safe_html_album,
+        'safe_html_album' => $safe_html_album,
         'tabs' => $tabs,
         'list' => $listing,
         'owner' => $album['user'],

@@ -9,7 +9,7 @@ use function Chevereto\Legacy\getSetting;
 if (!defined('ACCESS') || !ACCESS) {
     die('This file cannot be directly accessed.');
 } ?>
-<?php $album = Handler::var('album_safe_html'); ?>
+<?php $album = Handler::var('safe_html_album'); ?>
 <div class="input-label">
 	<?php
         $label = 'form-album-name';

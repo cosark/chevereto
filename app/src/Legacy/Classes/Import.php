@@ -11,6 +11,9 @@
 
 namespace Chevereto\Legacy\Classes;
 
+use Chevereto\Authorization\Authorization;
+use Chevereto\Authorization\RoleBit;
+use Chevereto\Http\RequestUser;
 use Exception;
 use FilesystemIterator;
 use LogicException;
@@ -622,6 +625,11 @@ class Import
                                     $user = User::getSingle($insertId, 'id');
                                 }
                                 if ($user !== [] && isset($this->metadata['profileImages'])) {
+                                    $requestUser = new RequestUser(
+                                        roles: Authorization::roles()->forMask(
+                                            RoleBit::Admin->value | RoleBit::Manager->value
+                                        ),
+                                    );
                                     try {
                                         foreach ($this->metadata['profileImages'] as $k => $v) {
                                             $userAsset = [
@@ -634,7 +642,7 @@ class Import
                                             $this->logProcess("Uploading user {$k} image");
                                             if (file_exists($userAsset['tmp_name'])) {
                                                 try {
-                                                    User::uploadPicture($user, $k, $userAsset);
+                                                    User::uploadPicture($user, $k, $userAsset, $requestUser, isFiles: false);
                                                 } catch (Exception) {
                                                     $this->logProcess(sprintf('Failed to upload user %s', $k), true);
                                                 }
@@ -748,7 +756,7 @@ class Import
                         $user_id = $content_id;
                     } else {
                         $params['album_id'] = $content_id;
-                        $album = Album::getSingle(id: $content_id, pretty: false);
+                        $album = Album::getById(id: $content_id, pretty: false);
                         if (isset($album['user_id'])) {
                             $user_id = $album['user_id'];
                         }
@@ -800,7 +808,7 @@ class Import
                         $this->logProcess('Image using parsed metadata ' . json_encode($this->parsed));
                         $params = array_merge($params, $this->parsed);
                     }
-                    $uploadToWebsite = Image::uploadToWebsite($parsed, $user, $params, false, '127.0.0.1');
+                    $uploadToWebsite = Image::uploadToWebsite('file', $parsed, $user, $params, false, '127.0.0.1', isFiles: false);
                     $insertId = $uploadToWebsite[0];
                     $this->logProcess("Image ID {$insertId} inserted");
                 } catch (Exception $e) {

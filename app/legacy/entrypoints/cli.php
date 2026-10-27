@@ -28,6 +28,7 @@ $options = [
     'bulk-importer',
     'cache-view',
     'cache-flush',
+    'cloudflare-proxies',
     'cron',
     'decrypt-secrets',
     'encrypt-secrets',

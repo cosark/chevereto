@@ -367,13 +367,13 @@ class Listing
 
     private int $output_count = 0;
 
-    private bool $has_page_next;
+    private bool $has_page_next = false;
 
     private array $output_assoc = [];
 
     private bool $sfw = true;
 
-    private bool $has_page_prev;
+    private bool $has_page_prev = false;
 
     private int $isApproved = 1;
 
@@ -401,11 +401,13 @@ class Listing
 
     private bool $reverse = false;
 
-    private ?string $outputTpl;
+    private ?string $outputTpl = null;
 
     private array $first = [];
 
     private bool $isOutputAssoc = false;
+
+    private array $ids = [];
 
     public function first(): array
     {
@@ -429,13 +431,13 @@ class Listing
 
     public function outputTpl(): ?string
     {
-        return $this->outputTpl ?? null;
+        return $this->outputTpl;
     }
 
     public function debugQuery()
     {
         if (! isset($this->query)) {
-            throw new BadMethodCallException();
+            throw new BadMethodCallException('Listing query is not set. You must call exec() before debugQuery()');
         }
         $params = [];
         foreach ($this->binds as $bind) {
@@ -453,14 +455,15 @@ class Listing
         return $this->limit;
     }
 
-    // Sets the `image_is_approved` flag
-    public function setApproved($bool)
+    public function setApproved(int $flag): void
     {
-        $this->isApproved = $bool;
+        $this->isApproved = $flag;
     }
 
-    // Sets the type of resource being listed
-    public function setType($type)
+    /**
+     * images | files | users | albums
+     */
+    public function setType(string $type)
     {
         $this->type = $type === 'files'
             ? 'images'
@@ -512,12 +515,12 @@ class Listing
         }
     }
 
-    public function setReverse($bool): void
+    public function setReverse(bool $bool): void
     {
         $this->reverse = $bool;
     }
 
-    public function setParamsHidden($params): void
+    public function setParamsHidden(array $params): void
     {
         $this->params_hidden = $params;
     }
@@ -531,7 +534,9 @@ class Listing
     // Sets the sort type (sql> SORT BY sort_type)
     public function setSortType($sort_type): void
     {
-        $this->sort_type = $sort_type === 'date' ? 'date_gmt' : $sort_type;
+        $this->sort_type = $sort_type === 'date'
+            ? 'date_gmt'
+            : $sort_type;
     }
 
     // Sets the sort order (sql> DESC | ASC)
@@ -707,21 +712,47 @@ class Listing
             $this->where = 'WHERE ' . implode(' ', $where_arr);
         }
         if (version_compare(cheveretoVersionInstalled(), '3.7.0', '>=')) {
-            // Dynamic since v3.9.0
-            $likes_join = 'LEFT JOIN '
-                . $tables['likes']
-                . ' ON '
-                . $tables['likes']
-                . '.like_content_type = "'
-                . $type_singular
-                . '" AND '
-                . $tables['likes']
-                . '.like_content_id = '
-                . $tables[$this->type]
-                . '.'
-                . $type_singular
-                . '_id';
+            $likes_join = <<<SQL
+            LEFT JOIN {$tables['likes']}
+                ON {$tables['likes']}.like_content_type = "{$type_singular}"
+                AND {$tables['likes']}.like_content_id = {$tables[$this->type]}.{$type_singular}_id
+
+            SQL;
             if (preg_match('/like_user_id/', $this->where)) {
+                if (! ($this->requester['is_content_manager'] ?? false)
+                    && in_array($this->type, ['images', 'albums'], true)
+                ) {
+                    $likeUser = preg_match('/like_user_id\s*=\s*(:\w+|\d+)/', $this->where, $likeUserMatch)
+                        ? $likeUserMatch[1]
+                        : '0';
+                    $forcedPrivacy = (int) (getSetting('website_privacy_mode') === 'private'
+                        && getSetting('website_content_privacy_mode') === 'private');
+                    if ($this->type === 'images') {
+                        $likes_join .= <<<SQL
+                        LEFT JOIN {$tables['albums']} AS filter_albums ON filter_albums.album_id = {$tables['images']}.image_album_id
+                        SQL;
+                        $this->appendWhere(
+                            <<<SQL
+                            (
+                            filter_albums.album_id IS NULL
+                            OR filter_albums.album_user_id = {$likeUser}
+                            OR (:forced_privacy = 0 AND filter_albums.album_privacy NOT IN ('private', 'password'))
+                            )
+                            SQL
+                        );
+                    }
+                    if ($this->type === 'albums') {
+                        $this->appendWhere(
+                            <<<SQL
+                            (
+                            album_user_id = {$likeUser}
+                            OR (:forced_privacy = 0 AND album_privacy NOT IN ('private', 'password'))
+                            )
+                            SQL
+                        );
+                    }
+                    $this->bind(':forced_privacy', $forcedPrivacy);
+                }
                 $joins[$this->type]['likes'] = $likes_join;
             } elseif ($this->requester !== [] && ! in_array($this->type, ['users', 'tags'])) {
                 $joins[$this->type]['likes'] = $likes_join
@@ -753,19 +784,11 @@ class Listing
         // Add ID reservation clause
         if ($this->type === 'images') {
             $res_id_where = 'image_size > 0';
-            if ($this->where === '') {
-                $this->where = 'WHERE ' . $res_id_where;
-            } else {
-                $this->where .= ' AND ' . $res_id_where;
-            }
+            $this->appendWhere($res_id_where);
             // Add category clause
             if (isset($this->category)) {
                 $category_qry = $tables['images'] . '.image_category_id = ' . $this->category;
-                if ($this->where === '') {
-                    $this->where = 'WHERE ' . $category_qry;
-                } else {
-                    $this->where .= ' AND ' . $category_qry;
-                }
+                $this->appendWhere($category_qry);
             }
         }
         if (in_array($this->type, ['images', 'albums'])) {
@@ -793,20 +816,20 @@ class Listing
                 $relationTagIdColumn = 'tag_file_tag_id';
                 $tableImages = $tables['images'];
                 $tagPivot = 'tag_file_file_id';
-                $tagSql = <<<MySQL
+                $tagSql = <<<SQL
                 EXISTS (
                     SELECT `{$tagPivot}`
                     FROM `{$tableTagsFiles}`
                     WHERE `{$relationTagIdColumn}` IN ({$inTagsSQL})
                     AND `{$tagPivot}` = {$tableImages}.image_id
 
-                MySQL;
+                SQL;
                 if ($this->type === 'albums') {
                     $tableRelation = $tables['tags_albums'];
                     $relationTagIdColumn = 'tag_album_tag_id';
                     $tableAlbums = $tables['albums'];
                     $tagPivot = 'tag_album_album_id';
-                    $tagSql = <<<MySQL
+                    $tagSql = <<<SQL
                     EXISTS (
                         SELECT `{$tagPivot}`
                         FROM `{$tableRelation}`
@@ -814,18 +837,14 @@ class Listing
                         AND `{$tagPivot}` = {$tableAlbums}.album_id
                         AND `tag_album_count` > 0
 
-                    MySQL;
+                    SQL;
                 }
                 if ($this->tagsMatch === 'all') {
                     $tagBinds[':tag_count'] = count($this->tagsIds);
                     $tagSql .= ' HAVING COUNT(*) = :tag_count';
                 }
                 $tagSql .= ')';
-                if ($this->where === '') {
-                    $this->where = 'WHERE ' . $tagSql;
-                } else {
-                    $this->where .= ' AND ' . $tagSql;
-                }
+                $this->appendWhere($tagSql);
                 foreach ($tagBinds as $k => $v) {
                     $this->bind($k, $v);
                 }
@@ -839,11 +858,7 @@ class Listing
                 (! isset($this->owner) || $this->requester === []) || $this->owner !== $this->requester['id']
             )
         ) {
-            if ($this->where === '') {
-                $this->where = 'WHERE ';
-            } else {
-                $this->where .= ' AND ';
-            }
+            $this->appendWhere('');
             $nsfw_off = $this->requester !== []
                 ? ! $this->requester['show_nsfw_listings']
                 : ! getSetting('show_nsfw_in_listings');
@@ -898,11 +913,7 @@ class Listing
                     $this->seek = ['0000-01-01 00:00:00', $this->seek[1]];
                 }
             }
-            if ($this->where === '') {
-                $this->where = 'WHERE ';
-            } else {
-                $this->where .= ' AND ';
-            }
+            $this->appendWhere('');
             if ($this->reverse) {
                 $this->sort_order = $this->sort_order === 'asc' ? 'desc' : 'asc';
             }
@@ -1016,9 +1027,18 @@ class Listing
             );
             $query .= $topOrder;
         }
+        $this->query = $query;
         usort($this->binds, function ($a, $b) {
             return strcmp($a['param'], $b['param']);
         });
+        $formatClass = match ($this->type) {
+            'images', 'files' => Image::class,
+            'users' => User::class,
+            'albums' => Album::class,
+            'tags' => Tag::class,
+            default => throw new Exception('Invalid type for formatting: ' . $this->type),
+        };
+        $prefix = DB::getFieldPrefix($this->type) . '_';
         $cacheable = Cache::isEnabled()
             && $this->requester === [];
         if ($cacheable) {
@@ -1026,9 +1046,6 @@ class Listing
             foreach ($this->binds as $k => $v) {
                 $listingPageBinds[$v['param']] = $v['value'];
             }
-            // $rootBinds = $listingPageBinds;
-            // unset($rootBinds[':seekSort'], $rootBinds[':seekKey']);
-            // $listingHash = Cache::hash($query . serialize($rootBinds));
             $listingPageHash = Cache::hash($query . serialize($listingPageBinds));
             $cacheKeyListingPage = "l:{$listingPageHash}";
             $cached = Cache::instance()->get($cacheKeyListingPage);
@@ -1037,7 +1054,9 @@ class Listing
                 $this->has_page_next = $cached['has_page_next'];
                 $this->has_page_prev = $cached['has_page_prev'];
                 $this->nsfw = $cached['nsfw'];
-                $this->output = unserialize(gzuncompress($cached['output']));
+                $this->output = unserialize(gzuncompress($cached['output']), [
+                    'allowed_classes' => false,
+                ]);
                 $filler = [];
                 foreach ($cached['joinSelect'] as $joinSelect) {
                     $filler = array_merge($filler, array_fill_keys(static::COLUMNS[$joinSelect], null));
@@ -1052,21 +1071,20 @@ class Listing
                 $this->sfw = $cached['sfw'];
                 $this->output_assoc = [];
                 $this->first = $cached['first'];
-                if (! $this->isOutputAssoc()) {
+                $this->ids = array_column($this->output, $prefix . 'id');
+                if (! $this->isOutputAssoc) {
                     return;
                 }
-                $formatFunction = 'Chevereto\Legacy\Classes\\' . ucfirst(substr($this->type, 0, -1));
                 foreach ($this->output as $k => $v) {
                     $this->output_assoc[] = $this->type === 'images'
-                        ? $formatFunction::formatArray($v, fillAlbumCover: false)
-                        : $formatFunction::formatArray($v);
+                        ? $formatClass::formatArray($v, fillAlbumCover: false)
+                        : $formatClass::formatArray($v);
                 }
 
                 return;
             }
         }
         $db = DB::getInstance();
-        $this->query = $query;
         $db->query($this->query);
         foreach ($this->binds as $bind) {
             $db->bind($bind['param'], $bind['value'], $bind['type'] ?? null);
@@ -1108,48 +1126,24 @@ class Listing
         $this->count = count($this->output);
         $this->nsfw = false;
         $this->output_assoc = [];
-        $formatFunction = 'Chevereto\Legacy\Classes\\' . ucfirst(substr($this->type, 0, -1));
-        $prefix = DB::getFieldPrefix($this->type) . '_';
-        $ids = [];
-        foreach ($this->output as $k => $v) {
-            if ($this->isOutputAssoc()) {
-                $this->output_assoc[] = $this->type === 'images'
-                    ? $formatFunction::formatArray($v, fillAlbumCover: false)
-                    : $formatFunction::formatArray($v);
-            }
-            $ids[] = $v[$prefix . 'id'];
-            if (! $this->nsfw && isset($v[$prefix . 'nsfw']) && $v[$prefix . 'nsfw']) {
-                $this->nsfw = true;
-            }
-        }
-        if (in_array($this->type, ['images', 'albums'])) {
-            $this->first = $this->output_assoc[0] ?? $this->output[0] ?? [];
-            if ($this->first !== [] && $this->output_assoc === []) {
-                $this->first = $this->type === 'images'
-                    ? $formatFunction::formatArray($this->first, fillAlbumCover: false)
-                    : $formatFunction::formatArray($this->first);
-            }
-        }
-        if ($this->type === 'albums') {
-            $this->nsfw = false;
-        }
-        $this->sfw = ! $this->nsfw;
-        Handler::setCond('show_viewer_zero', isset(request()['viewer']) && $this->count > 0);
+        $this->ids = array_column($this->output, $prefix . 'id');
+        $albumIds = array_column($this->output, $prefix . 'album_id');
+        $albumIds = array_unique(array_filter($albumIds, 'is_int'));
         if ($this->type === 'albums' && $this->output !== []) {
             $selectColumns = array_merge(
                 self::COLUMNS['images'],
                 self::COLUMNS['storages']
             );
             $selectColumns = implode(', ', $selectColumns);
-            $inIds = implode(',', $ids);
-            $coverSQL = <<<MySQL
+            $inIds = implode(',', $this->ids);
+            $coverSQL = <<<SQL
             SELECT {$selectColumns}
             FROM {$tables['albums']} a
             JOIN {$tables['images']} i ON a.album_cover_id = i.image_id
             LEFT JOIN {$tables['storages']} s ON i.image_storage_id = s.storage_id
             WHERE album_id IN ({$inIds})
             AND image_is_approved = 1;
-            MySQL;
+            SQL;
             $albums_mapping = [];
             foreach ($this->output as $k => &$album) {
                 $album['album_id'] ??= '';
@@ -1162,34 +1156,42 @@ class Listing
             }
             $db->query($coverSQL);
             $albums_slice = $db->fetchAll();
-            if (! empty($albums_slice)) {
-                foreach ($albums_slice as $slice) {
-                    $album_key = $albums_mapping[$slice['image_album_id']] ?? null;
-                    if ($album_key === null) {
-                        continue;
-                    }
-                    if (! isset($this->output[$album_key]['album_images_slice'])) {
-                        $this->output[$album_key]['album_images_slice'] = [];
-                    }
-                    foreach ($slice as $key => $value) {
-                        if ($value === null) {
-                            unset($slice[$key]);
-                        }
-                    }
-                    $this->output[$album_key]['album_images_slice'][] = $slice;
+            foreach ($albums_slice ?: [] as $slice) {
+                $album_key = $albums_mapping[$slice['image_album_id']] ?? null;
+                if ($album_key === null) {
+                    continue;
                 }
+                if (! isset($this->output[$album_key]['album_images_slice'])) {
+                    $this->output[$album_key]['album_images_slice'] = [];
+                }
+                $this->output[$album_key]['album_images_slice'][] = $slice;
             }
         }
+        foreach ($this->output as $k => $v) {
+            if ($this->isOutputAssoc) {
+                $this->output_assoc[] = $this->type === 'images'
+                    ? $formatClass::formatArray($v, fillAlbumCover: false)
+                    : $formatClass::formatArray($v);
+            }
+            if (! $this->nsfw && isset($v[$prefix . 'nsfw']) && $v[$prefix . 'nsfw']) {
+                $this->nsfw = true;
+            }
+        }
+        if (in_array($this->type, ['images', 'albums'])) {
+            $this->first = $this->output_assoc[0] ?? $this->output[0] ?? [];
+            if ($this->first !== [] && $this->output_assoc === []) {
+                $this->first = $this->type === 'images'
+                    ? $formatClass::formatArray($this->first, fillAlbumCover: false)
+                    : $formatClass::formatArray($this->first);
+            }
+        }
+        if ($this->type === 'albums') {
+            $this->nsfw = false;
+        }
+        $this->sfw = ! $this->nsfw;
+        Handler::setCond('show_viewer_zero', isset(request()['viewer']) && $this->count > 0);
         if (! $cacheable) {
             return;
-        }
-        $output = $this->output;
-        foreach ($output as $pos => $array) {
-            foreach ($array as $key => $value) {
-                if ($value === null) {
-                    unset($output[$pos][$key]);
-                }
-            }
         }
         Cache::instance()->set(
             $cacheKeyListingPage,
@@ -1201,7 +1203,7 @@ class Listing
                 'has_page_prev' => $this->has_page_prev,
                 'nsfw' => $this->nsfw,
                 'output_count' => $this->output_count,
-                'output' => gzcompress(serialize($output)),
+                'output' => gzcompress(serialize($this->output)),
                 'seek' => $this->seek,
                 'seekEnd' => $this->seekEnd,
                 'seekStart' => $this->seekStart,
@@ -1217,10 +1219,14 @@ class Listing
             default => throw new LogicException('Invalid cache type::' . $type_singular),
         };
         $cache = Cache::instance();
-        foreach ($ids as $id) {
+        foreach ($this->ids as $id) {
             $cacheKeyTypeIdListing = $cache->getKey("{$cacheType}:{$id}:l");
-            $cacheValue = "{$listingPageHash}";
-            $cache->redis()->sAdd($cacheKeyTypeIdListing, $cacheValue);
+            $cache->redis()->sAdd($cacheKeyTypeIdListing, $listingPageHash);
+            $cache->redis()->expire($cacheKeyTypeIdListing, 300);
+        }
+        foreach ($albumIds as $id) {
+            $cacheKeyTypeIdListing = $cache->getKey("a:{$id}:l");
+            $cache->redis()->sAdd($cacheKeyTypeIdListing, $listingPageHash);
             $cache->redis()->expire($cacheKeyTypeIdListing, 300);
         }
     }
@@ -1600,7 +1606,8 @@ class Listing
             $render = 'Chevereto\Legacy\get_peafowl_item_list';
         }
         $tools = $this->tools ?: [];
-        $doTags = in_array($tpl_list, ['image', 'user/image', 'album/image'])
+        $doTags = $this->ids !== []
+            && in_array($tpl_list, ['image', 'user/image', 'album/image'])
             && $this->tools
             && (
                 $this->owner === ($this->requester['id'] ?? false)
@@ -1615,7 +1622,7 @@ class Listing
             $filesTable = DB::getTable('images');
             $tagsTable = DB::getTable('tags');
             $inFiles = implode(',', $ids);
-            $tagsSQL = <<<MySQL
+            $tagsSQL = <<<SQL
             SELECT tf.tag_file_tag_id id, tags.tag_name name, tf.tag_file_file_id file_id
             FROM `{$tagsFilesTable}` tf
             LEFT JOIN `{$filesTable}` files ON tf.tag_file_file_id = files.image_id
@@ -1623,7 +1630,7 @@ class Listing
             WHERE tf.tag_file_file_id IN ({$inFiles})
             AND tags.tag_name IS NOT NULL;
 
-            MySQL;
+            SQL;
             $fetchTags = DB::queryFetchAll($tagsSQL);
             foreach ($fetchTags as $tag) {
                 $tagId = $tag['id'];
@@ -1643,9 +1650,6 @@ class Listing
         /** @var callable $tagFn */
         $tagFn = require_theme_file_return('snippets/tag');
         $items = [];
-        // if (str_ends_with($tpl_list, 'album')) {
-        //     $ids = array_column($this->output, 'album_id');
-        // }
         foreach ($this->output as $pos => &$row) {
             switch ($tpl_list) {
                 case 'image':
@@ -1717,7 +1721,11 @@ class Listing
         $listing->setLimit(1);
         $listing->setSortType('date');
         $listing->setSortOrder('desc');
-        $listing->setWhere('WHERE album_id=:album_id');
+        $listing->setWhere(
+            <<<SQL
+            WHERE album_id=:album_id
+            SQL
+        );
         $listing->bind(':album_id', $album_id);
         $listing->exec();
 
@@ -1731,7 +1739,6 @@ class Listing
         $listingSafeCount = Settings::LISTING_SAFE_COUNT;
         $listing_pagination_mode = getSetting('listing_pagination_mode');
         if ($type === 'tags') {
-            // $items_per_page = 200;
             $listingSafeCount = 200;
         }
         $params = [];
@@ -1830,8 +1837,12 @@ class Listing
         return ($this->where === '' ? 'WHERE ' : ($this->where . ' AND ')) . $where;
     }
 
-    private function isOutputAssoc(): bool
+    private function appendWhere(string $where): void
     {
-        return $this->isOutputAssoc;
+        if ($this->where === '') {
+            $this->where = 'WHERE ' . $where;
+        } else {
+            $this->where .= ' AND ' . $where;
+        }
     }
 }

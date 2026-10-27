@@ -11,6 +11,11 @@
 
 namespace Chevereto\Legacy\Classes;
 
+use Chevereto\Authorization\RoleBit;
+use Chevereto\Http\RequestUser;
+use Chevereto\Permissions\AdminPermission;
+use Chevereto\Permissions\ManagerPermission;
+use Chevereto\Permissions\UserPermission;
 use Exception;
 use OverflowException;
 use function Chevere\Message\message;
@@ -67,6 +72,11 @@ class User
         }
         $user_db['user_is_admin'] ??= false;
         $user_db['user_is_manager'] ??= false;
+        $user_db['user_role_bitmask'] = match (true) {
+            (bool) $user_db['user_is_admin'] => RoleBit::Admin->value | RoleBit::Manager->value,
+            (bool) $user_db['user_is_manager'] => RoleBit::Manager->value,
+            default => RoleBit::User->value,
+        };
         $user_db['user_is_content_manager'] = $user_db['user_is_admin'] || $user_db['user_is_manager'];
         if (! array_key_exists('user_following', $user_db)) {
             $user_db['user_following'] = 0;
@@ -83,6 +93,30 @@ class User
         }
 
         return $user_db;
+    }
+
+    /**
+     * @return array<string, mixed> Keyed by attribute name
+     */
+    public static function getAttributes(int $id, string ...$attributes): array
+    {
+        if ($attributes === []) {
+            return [];
+        }
+        $columns = implode(', ', array_map(
+            fn (string $attribute) => "user_{$attribute} AS `{$attribute}`",
+            $attributes
+        ));
+        $table = DB::getTable('users');
+
+        return DB::fetchSingleQuery(
+            <<<SQL
+            SELECT {$columns} FROM {$table} WHERE user_id=:id;
+            SQL,
+            [
+                ':id' => $id,
+            ],
+        );
     }
 
     public static function getPrivate(): array
@@ -244,6 +278,7 @@ class User
         ) {
             $url = getSetting('website_mode_personal_routing') !== '/' ? getSetting('website_mode_personal_routing') : '';
         }
+        $url = safe_html($url);
 
         return get_base_url($url, $isPublic);
     }
@@ -397,8 +432,13 @@ class User
         ]);
     }
 
-    public static function uploadPicture(int|array $user, string $type, array|string $source): ?array
-    {
+    public static function uploadPicture(
+        int|array $user,
+        string $type,
+        array $source,
+        RequestUser $requestUser,
+        bool $isFiles = true,
+    ): ?array {
         $type = strtolower($type);
         if (! in_array($type, ['background', 'avatar'], true)) {
             throw new Exception('Invalid upload type', 600);
@@ -409,6 +449,7 @@ class User
         if ($user === []) {
             throw new Exception("target user doesn't exists", 601);
         }
+        static::assertCanEdit($user, $requestUser);
         $localPath = dirname(Upload::getTempNam());
         $storagePath = 'content/images/users/' . $user['id_encoded'] . '/';
         $filename = ($type === 'avatar' ? 'av' : 'bkg') . '_' . strtotime(datetimegmt());
@@ -416,7 +457,7 @@ class User
             'max_size' => get_bytes(Settings::get('user_image_' . $type . '_max_filesize_mb') . ' MB'),
         ];
         $storage_id = 0;
-        $image_upload = Image::upload($source, $localPath, $filename, $uploadOptions, $storage_id);
+        $image_upload = Image::upload($source, $localPath, $filename, $uploadOptions, $storage_id, isFiles: $isFiles);
         /** @var array $uploaded */
         $uploaded = $image_upload['uploaded'];
         $extension = $uploaded['extension'];
@@ -516,8 +557,11 @@ class User
         return $uploaded['fileinfo'];
     }
 
-    public static function deletePicture(int|array $user, string $deleting): bool
-    {
+    public static function deletePicture(
+        int|array $user,
+        string $deleting,
+        RequestUser $requestUser,
+    ): bool {
         $deleting = strtolower($deleting);
         if (! in_array($deleting, ['background', 'avatar'], true)) {
             throw new Exception('Invalid delete type', 600);
@@ -525,9 +569,7 @@ class User
         if (! is_array($user)) {
             $user = self::getSingle($user, 'id', true);
         }
-        if ($user === []) {
-            throw new Exception("Target user doesn't exists", 601);
-        }
+        static::assertCanEdit($user, $requestUser);
         if (! $user[$deleting]) {
             throw new Exception('user ' . $deleting . " doesn't exists", 602);
         }
@@ -712,12 +754,15 @@ class User
         $user['url_liked'] = get_base_url($user['url'] . '/liked');
         $user['url_following'] = get_base_url($user['url'] . '/following');
         $user['url_followers'] = get_base_url($user['url'] . '/followers');
-        if (isset($user['website']) && ! is_url_web($user['website'])) {
+        if (isset($user['website'])
+            && ! is_url_web($user['website'])
+        ) {
             unset($user['website']);
         }
         if (isset($user['website'])) {
-            $user['website_safe_html'] = safe_html($user['website']);
-            $user['website_display'] = $user['is_admin'] ? $user['website_safe_html'] : get_redirect_url($user['website_safe_html']);
+            $user['website_display'] = $user['is_admin']
+                ? $user['website']
+                : get_redirect_url($user['website']);
         }
         if (isset($user['bio'])) {
             $user['bio_safe_html'] = safe_html($user['bio']);
@@ -741,15 +786,22 @@ class User
         $user['name_short'] = mb_strlen($user['name']) > 20 ? $user['firstname'] : $user['name'];
         $user['name_html'] = safe_html(strip_tags($user['name']));
         $user['name_short_html'] = safe_html(strip_tags($user['name_short']));
-        if (isset($user['avatar_filename'])) {
+        $user['avatar'] = null;
+        if (isset($user['avatar_filename'])
+            && self::validateAssetFilename($user['avatar_filename'])
+        ) {
             $avatar_file = $user['id_encoded'] . '/' . $user['avatar_filename'];
             $user['avatar'] = [
                 'filename' => $user['avatar_filename'],
                 'url' => get_users_image_url($avatar_file),
             ];
+            $user['avatar'] = safe_html($user['avatar']);
         }
         unset($user['avatar_filename']);
-        if (isset($user['background_filename'])) {
+        $user['background'] = null;
+        if (isset($user['background_filename'])
+            && self::validateAssetFilename($user['background_filename'])
+        ) {
             $background_file = $user['id_encoded'] . '/' . $user['background_filename'];
             $background_path = PATH_PUBLIC_CONTENT_IMAGES_USERS . $background_file;
             $pathinfo = pathinfo($background_path);
@@ -797,6 +849,43 @@ class User
             $user = self::formatArray($user);
             self::delete($user);
         }
+    }
+
+    public static function assertCanEdit(int|array $user, RequestUser $requestUser): void
+    {
+        $attributes = [];
+        if (is_array($user)) {
+            if (array_key_exists('is_admin', $user)
+                && array_key_exists('is_manager', $user)
+            ) {
+                $attributes = $user;
+            }
+            $user = (int) ($user['id'] ?? 0);
+        }
+        if ($user === 0) {
+            throw new Exception(code: 404);
+        }
+        if ($user === $requestUser->id) {
+            return;
+        }
+        $attributes = $attributes
+            ?: self::getAttributes($user, 'is_admin', 'is_manager');
+        if (! $attributes) {
+            throw new Exception(code: 404);
+        }
+        $permission = match (true) {
+            (bool) $attributes['is_admin'] => AdminPermission::Edit,
+            (bool) $attributes['is_manager'] => ManagerPermission::Edit,
+            default => UserPermission::Edit,
+        };
+        if (! $requestUser->hasPermission($permission)) {
+            throw new Exception(code: 403);
+        }
+    }
+
+    private static function validateAssetFilename(string $filename): bool
+    {
+        return preg_match('/^(?:av|bkg)_\d+\.[a-z0-9]+\z/i', $filename) === 1;
     }
 
     private static function iterate(

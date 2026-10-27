@@ -147,7 +147,7 @@ class L10n
         self::$enabled_languages = self::$available_languages;
         foreach (getSetting('languages_disable') as $k) {
             $k = str_replace('_', '-', $k);
-            self::$disabled_languages[$k] = $locales[$k];
+            self::$disabled_languages[$k] = $locales[$k] ?? $k;
             unset(self::$enabled_languages[$k]);
         }
     }

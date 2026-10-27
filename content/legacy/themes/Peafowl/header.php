@@ -284,7 +284,7 @@ foreach($tags_top as $k => $v) {
                             <?php
                         } ?>
                             <span class="user-image default-user-image<?php echo isset(Login::getUser()['avatar']['url']) ? ' hidden' : ''; ?>"><span class="icon fas fa-user-circle"></span></span>
-                            <span class="btn-text phone-hide phablet-hide">@<?php echo Login::getUser()['username']; ?></span>
+                            <span class="btn-text phone-hide phablet-hide">@<?php echo safe_html(Login::getUser()['username']); ?></span>
                         </span>
                         <div class="pop-box arrow-box arrow-box-top anchor-right">
                             <div class="pop-box-inner pop-box-menu">

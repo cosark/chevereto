@@ -75,8 +75,8 @@ if (Handler::cond('dashboard_user') or Handler::cond('content_manager')) { ?>
 <div class="c12 phablet-c1">
     <div class="input-label">
         <label for="username"><?php _se('Username'); ?></label>
-        <input autocomplete="nickname" type="text" name="username" id="username" maxlength="<?php echo Settings::USERNAME_MAX_LENGTH; ?>" class="text-input" value="<?php echo Handler::var('safe_post')["username"] ?? Handler::var('user')["username"]; ?>" pattern="<?php echo Settings::USERNAME_PATTERN; ?>" rel="tooltip" title='<?php _se('%i to %f characters<br>Letters, numbers and "_"', ['%i' => Settings::USERNAME_MIN_LENGTH, '%f' => Settings::USERNAME_MAX_LENGTH]); ?>' data-tipTip="right" placeholder="<?php _se('Username'); ?>" required>
-        <span class="input-warning red-warning"><?php echo Handler::var('input_errors')["username"] ?? ''; ?></span>
+        <input autocomplete="nickname" type="text" name="username" id="username" maxlength="<?php echo Settings::USERNAME_MAX_LENGTH; ?>" class="text-input" value="<?php echo Handler::var('safe_post')['username'] ?? Handler::var('safe_html_user')['username']; ?>" pattern="<?php echo Settings::USERNAME_PATTERN; ?>" rel="tooltip" title='<?php _se('%i to %f characters<br>Letters, numbers and "_"', ['%i' => Settings::USERNAME_MIN_LENGTH, '%f' => Settings::USERNAME_MAX_LENGTH]); ?>' data-tipTip="right" placeholder="<?php _se('Username'); ?>" required>
+        <span class="input-warning red-warning"><?php echo Handler::var('input_errors')['username'] ?? ''; ?></span>
         <?php
             if (getSetting('website_mode') == 'community') {
                 ?>
@@ -89,10 +89,10 @@ if (Handler::cond('dashboard_user') or Handler::cond('content_manager')) { ?>
             ?>
         <div class="input-label">
             <label for="email"><?php _se('Email address'); ?></label>
-            <input autocomplete="email" type="email" name="email" id="email" class="text-input" value="<?php echo Handler::var('safe_post')["email"] ?? Handler::var('user')["email"]; ?>" placeholder="<?php _se('Your email address'); ?>" <?php if (Handler::cond('email_required')) {
+            <input autocomplete="email" type="email" name="email" id="email" class="text-input" value="<?php echo Handler::var('safe_post')['email'] ?? Handler::var('safe_html_user')['email']; ?>" placeholder="<?php _se('Your email address'); ?>" <?php if (Handler::cond('email_required')) {
                 ?> required<?php
             } ?>>
-            <span class="input-warning red-warning"><?php echo Handler::var('input_errors')["email"] ?? ''; ?></span>
+            <span class="input-warning red-warning"><?php echo Handler::var('input_errors')['email'] ?? ''; ?></span>
             <?php if (Handler::var('changed_email_message')) {
                 ?><div class="input-below highlight padding-5 display-inline-block"><?php echo Handler::var('changed_email_message'); ?></div><?php
             } ?>

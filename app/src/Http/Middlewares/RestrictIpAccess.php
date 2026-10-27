@@ -26,14 +26,17 @@ final class RestrictIpAccess implements MiddlewareInterface
 {
     use MiddlewareNameWithArgumentsTrait;
 
-    private string $allowList;
+    /**
+     * @var string[] A list of allowed IP addresses and CIDRs.
+     */
+    private array $allow;
 
-    public function setUp(string $allowList): void
+    public function setUp(string ...$allow): void
     {
-        $this->allowList = $allowList;
+        $this->allow = $allow;
     }
 
-    public static function with(string $allowList): MiddlewareNameInterface
+    public static function with(string ...$allow): MiddlewareNameInterface
     {
         return static::middlewareName(...get_defined_vars());
     }
@@ -42,7 +45,7 @@ final class RestrictIpAccess implements MiddlewareInterface
         ServerRequestInterface $request,
         RequestHandlerInterface $handler,
     ): ResponseInterface {
-        if ($this->allowList === '') {
+        if ($this->allow === []) {
             return $handler->handle($request);
         }
         $remoteAddress = $request->getServerParams()['REMOTE_ADDR'] ?? '';
@@ -53,7 +56,7 @@ final class RestrictIpAccess implements MiddlewareInterface
                     'Unable to determine client IP address'
                 );
         }
-        $isAllowed = isIpAllowed($remoteAddress, $this->allowList);
+        $isAllowed = isIpAllowed($remoteAddress, ...$this->allow);
         if (! $isAllowed) {
             return (new Psr17Factory())
                 ->createResponse(

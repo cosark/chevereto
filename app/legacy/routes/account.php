@@ -83,14 +83,14 @@ return function (Handler $handler) {
 
             break;
         case 'two-factor':
-            if (! Login::isLoggedUser()) {
-                redirect('login', 302);
+            $challengeUserId = (int) (session()['challenge_two_factor'] ?? 0);
+            if ($challengeUserId === 0) {
+                redirect($logged_user['url'] ?? 'login', 302);
             }
-            if (! TwoFactor::hasFor($logged_user['id'])) {
-                redirect('settings/security', 302);
-            }
-            if (! sessionVar()->has('challenge_two_factor')) {
-                redirect($logged_user['url'] ?? '', 302);
+            if (! TwoFactor::hasFor($challengeUserId)) {
+                sessionVar()->remove('challenge_two_factor');
+                sessionVar()->remove('challenge_two_factor_cookie');
+                redirect($logged_user['url'] ?? 'login', 302);
             }
 
             break;
@@ -567,10 +567,18 @@ return function (Handler $handler) {
             $handler->setTemplate($route . '/' . 'two-factor');
             if (null !== ($POST['user-two-factor'] ?? null) && ! $is_error) {
                 $twoFactor = (new TwoFactor())->withSecret(
-                    TwoFactor::getSecretFor(intval($logged_user['id']))
+                    TwoFactor::getSecretFor($challengeUserId)
                 );
                 if ($twoFactor->verify($POST['user-two-factor'])) {
+                    $cookieType = session()['challenge_two_factor_cookie'] ?? null;
                     sessionVar()->remove('challenge_two_factor');
+                    sessionVar()->remove('challenge_two_factor_cookie');
+                    if ((int) ($logged_user['id'] ?? 0) !== $challengeUserId) {
+                        $logged_user = Login::login($challengeUserId, $cookieType ?? 'cookie');
+                    }
+                    if ($cookieType !== null) {
+                        Login::insertCookie($cookieType, $challengeUserId);
+                    }
                     redirect($logged_user['url'], 302);
                 } else {
                     $is_error = true;
@@ -578,7 +586,7 @@ return function (Handler $handler) {
                     RequestLog::insert([
                         'type' => $request_db_field,
                         'result' => 'fail',
-                        'user_id' => $logged_user['id'],
+                        'user_id' => $challengeUserId,
                     ]);
                     if ((getSetting('captcha') ?? false)
                         && isset($request_log)

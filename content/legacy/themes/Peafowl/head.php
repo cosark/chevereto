@@ -82,7 +82,7 @@ foreach ($links as $rel => $href) {
         'type' => 'website',
         'url' => $links['canonical']
             ?? get_current_url(safe: true, removeQs: ['lang'], public: true),
-        'title' => getSetting('website_doctitle', true),
+        'title' => getSetting('website_doctitle'),
         'image' => getSetting('homepage_cover_images')[0]['url'] ?? '',
         'site_name' => Handler::var('website_name'),
         'description' => Handler::var('meta_description'),
@@ -176,17 +176,20 @@ foreach ($links as $rel => $href) {
             $twitter_card['card'] = 'photo';
 
             break;
-        case Handler::var('admin') !== null && is_route('album'):
+        case Handler::var('album') !== null && is_route('album'):
         case Handler::var('user') !== null && is_route('user'):
             $twitter_card['card'] = 'gallery';
             if (is_route('album')) {
-                $twitter_card['creator'] = Handler::var('album')['user']['twitter']['username'];
+                $twitter_card['creator'] = isset(Handler::var('safe_html_album')['user']['twitter'])
+                    ? Handler::var('safe_html_album')['user']['twitter']['username']
+                    : null;
             } else {
-                $twitter_card['creator'] = isset(Handler::var('user')['twitter']) ? Handler::var('user')['twitter']['username'] : '';
+                $twitter_card['creator'] = isset(Handler::var('safe_html_user')['twitter'])
+                    ? Handler::var('safe_html_user')['twitter']['username']
+                    : null;
             }
-            $twitter_card['image'] = Handler::var('listing') && Handler::var('listing')->first()
-                ? Handler::var('listing')->first()['display_url']
-                : '';
+            $twitter_card['image'] = Handler::var('listing')?->first()['display_url']
+                ?? null;
 
             break;
     }
@@ -194,7 +197,10 @@ foreach ($links as $rel => $href) {
         if (!$v) {
             continue;
         }
-        echo '<meta name="twitter:' . $k . '" content="' . $v . '">' . "\n";
+        echo <<<HTML
+        <meta name="twitter:{$k}" content="{$v}">
+
+        HTML;
     }
     if (Handler::var('oembed')) {
         foreach (['json', 'xml'] as $format) {
@@ -207,7 +213,7 @@ foreach ($links as $rel => $href) {
                     . $format
                 )
             . '" title="'
-            . Handler::var('oembed')['title']
+            . safe_html(Handler::var('oembed')['title'])
             . '">' . "\n";
         }
     }

@@ -52,7 +52,7 @@ if (!defined('ACCESS') || !ACCESS) {
         <input type="url" name="website" id="website" class="text-input" value="<?php
             echo !empty(Handler::var('safe_post'))
                     ? (Handler::var('safe_post')["website"] ?? '')
-                    : (Handler::var('user')["website_safe_html"] ?? ''); ?>" data-validate rel="tooltip" title="https://domain.loc" data-tipTip="right" placeholder="https://domain.loc">
+                    : (Handler::var('safe_html_user')["website"] ?? ''); ?>" data-validate rel="tooltip" title="https://domain.loc" data-tipTip="right" placeholder="https://domain.loc">
         <span class="input-warning red-warning"><?php echo Handler::var('input_errors')["website"] ?? ''; ?></span>
     </div>
     <div class="input-label">

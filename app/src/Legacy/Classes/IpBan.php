@@ -11,6 +11,8 @@
 
 namespace Chevereto\Legacy\Classes;
 
+use Chevereto\Http\RequestUser;
+
 class IpBan
 {
     public static function getSingle(array $args = []): array
@@ -23,7 +25,7 @@ class IpBan
         return [];
     }
 
-    public static function delete(array $args = []): int
+    public static function delete(array $args, RequestUser $requestUser): int
     {
         return 0;
     }

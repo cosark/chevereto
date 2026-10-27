@@ -149,4 +149,14 @@ class Page
     {
         return 0;
     }
+
+    public static function countAll(): int
+    {
+        return 0;
+    }
+
+    public static function getCacheKey(string $urlKey): string
+    {
+        return 'page:' . $urlKey;
+    }
 }

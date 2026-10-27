@@ -91,13 +91,15 @@ return function (Handler $handler) {
             if ($is_login ?? false) {
                 $request_log_insert['result'] = 'success';
                 RequestLog::insert($request_log_insert);
+                if (TwoFactor::hasFor($user['id'])) {
+                    sessionVar()->put('challenge_two_factor', $user['id']);
+                    sessionVar()->put('challenge_two_factor_cookie', 'cookie');
+                    redirect('account/two-factor', 302);
+                }
                 $logged_user = Login::login($user['id']);
                 Login::insertCookie('cookie', $user['id']);
                 $redirect_to = User::getUrl(Login::getUser(), true);
-                if (TwoFactor::hasFor($user['id'])) {
-                    sessionVar()->put('challenge_two_factor', $user['id']);
-                    $redirect_to = 'account/two-factor';
-                } elseif (isset(session()['last_url'])) {
+                if (isset(session()['last_url'])) {
                     $redirect_to = session()['last_url'];
                 }
                 if ($user['status'] == 'awaiting-email') {

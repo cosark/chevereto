@@ -26,6 +26,7 @@ use Chevereto\Legacy\Classes\Like;
 use Chevereto\Legacy\Classes\Listing;
 use Chevereto\Legacy\Classes\Login;
 use Chevereto\Legacy\Classes\Notification;
+use Chevereto\Legacy\Classes\Palettes;
 use Chevereto\Legacy\Classes\Search;
 use Chevereto\Legacy\Classes\Settings;
 use Chevereto\Legacy\Classes\Stat;
@@ -35,6 +36,9 @@ use Chevereto\Legacy\Classes\TwoFactor;
 use Chevereto\Legacy\Classes\Upload;
 use Chevereto\Legacy\Classes\User;
 use Chevereto\Legacy\G\Handler;
+use Chevereto\Permissions\AdminPermission;
+use Chevereto\Permissions\ManagerPermission;
+use Chevereto\Permissions\UserPermission;
 use Hybridauth\Hybridauth;
 use function Chevere\Message\message;
 use function Chevere\Standard\randomString;
@@ -49,6 +53,7 @@ use function Chevereto\Legacy\G\check_value;
 use function Chevereto\Legacy\G\datetime;
 use function Chevereto\Legacy\G\datetimegmt;
 use function Chevereto\Legacy\G\fetch_url;
+use function Chevereto\Legacy\G\format_bytes;
 use function Chevereto\Legacy\G\get_base_url;
 use function Chevereto\Legacy\G\get_bytes;
 use function Chevereto\Legacy\G\get_client_ip;
@@ -69,7 +74,6 @@ use function Chevereto\Vars\files;
 use function Chevereto\Vars\post;
 use function Chevereto\Vars\request;
 use function Chevereto\Vars\requestHeaders;
-use function Chevereto\Vars\session;
 
 return function (Handler $handler) {
     try {
@@ -82,6 +86,7 @@ return function (Handler $handler) {
             throw new Exception(_s('Request denied'), 401);
         }
         $logged_user = Login::getUser();
+        $requestUser = Login::getRequestUser();
         $logged_user_source_db = [
             'user_name' => $logged_user['name'] ?? null,
             'user_username' => $logged_user['username'] ?? null,
@@ -103,7 +108,9 @@ return function (Handler $handler) {
             }
             $REQUEST['type'] ??= $HEADERS['X-Type'] ?? '';
             if ($doing !== 'upload-chunk') {
-                $source = $REQUEST['type'] === 'file'
+                $isFiles = $REQUEST['type'] === 'file'
+                    || in_array($REQUEST['what'] ?? '', ['avatar', 'background'], true);
+                $source = $isFiles
                     ? files()['source']
                     : $REQUEST['source'];
             }
@@ -265,7 +272,10 @@ return function (Handler $handler) {
                 break;
             case 'upload': // EX 100
                 // NOTE: This is considering assets and user uploads as the same "upload" action
-                $type = $REQUEST['type'];
+                if (! $source) {
+                    throw new Exception('No source provided', 600);
+                }
+                $type = $REQUEST['type'] ?? '';
                 if (isset($REQUEST['what'])
                     && in_array($REQUEST['what'], ['avatar', 'background'], true)
                 ) {
@@ -280,7 +290,8 @@ return function (Handler $handler) {
                             ? $logged_user
                             : $ownerId,
                         $REQUEST['what'],
-                        $source
+                        $source,
+                        $requestUser
                     );
                     $json_array['success'] = [
                         'image' => $user_picture_upload,
@@ -305,7 +316,7 @@ return function (Handler $handler) {
                         source_db: $logged_user_source_db
                     );
                 }
-                $uploadToWebsite = Image::uploadToWebsite($source, $logged_user, $REQUEST);
+                $uploadToWebsite = Image::uploadToWebsite($type, $source, $logged_user, $REQUEST, isFiles: true);
                 if ($logged_user !== []) {
                     session_write_close();
                 }
@@ -315,7 +326,7 @@ return function (Handler $handler) {
                     'message' => 'file uploaded',
                     'code' => 200,
                 ];
-                $image = Image::getSingle($uploaded_id);
+                $image = Image::getById($uploaded_id);
                 if ($image === []) {
                     throw new LogicException(
                         message('Missing image')
@@ -367,18 +378,34 @@ return function (Handler $handler) {
                     case 'images':
                         $binds = [];
                         $where = '';
+                        $getIdPrivateAware = function (int $userId) use ($handler, $logged_user): int {
+                            if ($userId === 0
+                                || $userId === ($logged_user['id'] ?? 0)
+                                || $handler::cond('content_manager')
+                            ) {
+                                return $userId;
+                            }
+
+                            return (bool) (User::getSingle($userId)['is_private'] ?? false)
+                                ? 0
+                                : $userId;
+                        };
                         if (! empty($REQUEST['like_user_id'])) {
+                            $likeUserId = decodeID($REQUEST['like_user_id']);
+                            $likeUserId = $getIdPrivateAware($likeUserId);
                             $where .= 'WHERE like_user_id=:image_user_id';
                             $binds[] = [
                                 'param' => ':image_user_id',
-                                'value' => decodeID($REQUEST['like_user_id']),
+                                'value' => $likeUserId,
                             ];
                         }
                         if (! empty($REQUEST['follow_user_id'])) {
+                            $followUserId = decodeID($REQUEST['follow_user_id']);
+                            $followUserId = $getIdPrivateAware($followUserId);
                             $where .= ($where === '' ? 'WHERE' : ' AND') . ' follow_user_id=:image_user_id';
                             $binds[] = [
                                 'param' => ':image_user_id',
-                                'value' => decodeID($REQUEST['follow_user_id']),
+                                'value' => $followUserId,
                             ];
                         }
                         if (! empty($REQUEST['userid'])) {
@@ -395,9 +422,20 @@ return function (Handler $handler) {
                                 'param' => ':image_album_id',
                                 'value' => $album_id,
                             ];
-                            $album = Album::getSingle($album_id);
+                            $album = Album::getById($album_id);
                             if ($album['user']['id'] ?? false) {
                                 $ownerId = $album['user']['id'];
+                            }
+                            if ($handler::cond('forced_private_mode')) {
+                                $album['privacy'] = getSetting('website_content_privacy_mode');
+                            }
+                            if ($album['privacy'] === 'private'
+                                && (
+                                    ! $handler::cond('content_manager')
+                                    && $ownerId !== ($logged_user['id'] ?? 0)
+                                )
+                            ) {
+                                throw new Exception(_s('Request denied'), 403);
                             }
                             if ($album['privacy'] === 'password'
                                 && (
@@ -592,9 +630,6 @@ return function (Handler $handler) {
                     $listing->setParamsHidden($params_hidden);
                 }
                 if ($list_request === 'images' && ! empty($REQUEST['albumid'])) {
-                    if ($handler::cond('forced_private_mode')) {
-                        $album['privacy'] = getSetting('website_content_privacy_mode');
-                    }
                     if (isset($album['privacy'])) {
                         $listing->setPrivacy($album['privacy']);
                     }
@@ -651,7 +686,8 @@ return function (Handler $handler) {
                         'region',
                         'url',
                         'server',
-                        'capacity',
+                        'service',
+                        'capacity_formatted',
                         'is_https',
                         'is_active',
                         'api_id',
@@ -659,7 +695,8 @@ return function (Handler $handler) {
                         'secret',
                         'account_id',
                         'account_name',
-                        'type_chain',
+                        'is_image',
+                        'is_video',
                         'use_path_style_endpoint',
                     ],
                     'ip_ban' => ['ip', 'expires', 'message'],
@@ -691,7 +728,7 @@ return function (Handler $handler) {
                 }
                 switch ($type) {
                     case 'image':
-                        $source_image_db = Image::getSingle($id);
+                        $source_image_db = Image::getById($id);
                         if ($source_image_db === []) {
                             throw new Exception(_s("%s doesn't exists", _n('Image', 'Images', 1)), 100);
                         }
@@ -727,18 +764,8 @@ return function (Handler $handler) {
                             throw new Exception('Invalid category', 102);
                         }
                         unset($editing['album_privacy'], $editing['new_album'], $editing['album_name']);
-                        if (! $handler::cond('content_manager')
-                            && getSetting('akismet')
-                        ) {
-                            Akismet::checkImage(
-                                title: $editing['title'] ?? null,
-                                description: $editing['description'] ?? null,
-                                tags: $editing['tags'] ?? null,
-                                source_db: $source_image_db
-                            );
-                        }
-                        Image::update($id, $editing);
-                        $image_edit_db = Image::getSingle($id);
+                        Image::update($id, $editing, $requestUser);
+                        $image_edit_db = Image::getById($id);
                         if ($image_edit_db === []) {
                             throw new LogicException(
                                 message('Missing image')
@@ -775,7 +802,7 @@ return function (Handler $handler) {
 
                         break;
                     case 'album':
-                        $source_album_db = Album::getSingle(
+                        $source_album_db = Album::getById(
                             id: $id,
                             pretty: false
                         );
@@ -802,6 +829,15 @@ return function (Handler $handler) {
                                 if ($editing['album_id'] === '') {
                                     $editing['album_id'] = null;
                                 }
+                                if ($editing['album_id'] !== null) {
+                                    $target_album_db = Album::getById(id: (int) $editing['album_id'], pretty: false);
+                                    if ($target_album_db === []
+                                        || $target_album_db['album_user_id'] === null
+                                        || $target_album_db['album_user_id'] !== $source_album_db['album_user_id']
+                                    ) {
+                                        throw new Exception('Invalid content owner request', 103);
+                                    }
+                                }
                             }
                             // Note: Includes move album to album
                             Album::moveContents($id, $editing['album_id']);
@@ -812,7 +848,7 @@ return function (Handler $handler) {
                             }
                             Album::update($id, $editing);
                         }
-                        $album_edited = Album::getSingle((int) ($editing['album_id'] ?? $id));
+                        $album_edited = Album::getById((int) ($editing['album_id'] ?? $id));
                         if ($album_edited === []) {
                             throw new Exception("Edited album doesn't exists", 100);
                         }
@@ -824,7 +860,7 @@ return function (Handler $handler) {
                         $json_array['album'] = $album_edited;
                         if (isset($album_move)) {
                             $json_array['old_album'] = Album::formatArray(
-                                Album::getSingle(id: $id, pretty: false),
+                                Album::getById(id: $id, pretty: false),
                                 true
                             );
                             $json_array['album']['html'] = Listing::getAlbumHtml($album_edited['id'] ?? '');
@@ -1241,6 +1277,9 @@ return function (Handler $handler) {
                 if ($logged_user === [] && $album['new'] === false) {
                     throw new Exception('Invalid request', 403);
                 }
+                if ($logged_user === [] && ! empty($album['parent_id'])) {
+                    throw new Exception('Invalid parent album owner', 403);
+                }
                 $ownerId = ! empty($REQUEST['owner'])
                     ? decodeID($REQUEST['owner'])
                     : ($logged_user['id'] ?? null);
@@ -1266,7 +1305,14 @@ return function (Handler $handler) {
                             : null,
                     ])
                     : decodeID($album['id']);
-                $album_db = Album::getSingle(id: $album_id, pretty: false);
+                $album_db = Album::getById(id: $album_id, pretty: false);
+                if (! $album['new']
+                    && $album_db !== []
+                    && $album_db['album_user_id'] !== ($logged_user['id'] ?? 0)
+                    && ! $handler::cond('content_manager')
+                ) {
+                    throw new Exception('Invalid content owner request', 104);
+                }
                 if (isset($album['ids']) && is_array($album['ids'])) {
                     if (count($album['ids']) === 0) {
                         throw new Exception('Invalid source album ids ' . ($doing === 'move' ? 'move' : 'create') . ' request', 100);
@@ -1278,15 +1324,19 @@ return function (Handler $handler) {
                 }
                 if (! empty($ids) && is_array($ids)) {
                     if ($type === 'images') {
+                        if ($album_db !== [] && $album_db['album_user_id'] !== $ownerId) {
+                            throw new Exception('Album owner mismatch', 403);
+                        }
+                        if ($logged_user === []) {
+                            $ids = Image::filterGuestImages(...$ids);
+                            if ($ids === []) {
+                                throw new Exception('Invalid content owner request', 104);
+                            }
+                        }
                         $images = Image::getMultiple($ids);
                         $images_ids = [];
                         foreach ($images as $image) {
-                            if ($logged_user === []
-                                && in_array($image['image_id'], session()['guest_images'] ?? [], false) === false
-                            ) {
-                                continue;
-                            }
-                            if (! $handler::cond('content_manager') && $image['image_user_id'] !== ($logged_user['id'] ?? null)) {
+                            if ($image['image_user_id'] !== $ownerId) {
                                 continue;
                             }
                             $images_ids[] = $image['image_id'];
@@ -1298,10 +1348,15 @@ return function (Handler $handler) {
                             $album_db === []
                                 ? null
                                 : (int) $album_db['album_id'],
-                            $images_ids
+                            $ownerId,
+                            ...$images_ids
                         );
                     } else {
                         $album_move = true;
+                        // Empty album id targets the stream (root)
+                        $target_album_id = ! $album['new'] && ($album['id'] ?? '') === ''
+                            ? null
+                            : $album_id;
                         $albums = Album::getMultiple($ids);
                         $albums_ids = [];
                         foreach ($albums as $album) {
@@ -1313,11 +1368,11 @@ return function (Handler $handler) {
                         if (! $albums_ids) {
                             throw new Exception('Invalid content owner request', 105);
                         }
-                        Album::moveContents($albums_ids, $album_id);
+                        Album::moveContents($albums_ids, $target_album_id);
                     }
                 }
                 $album_move_db = isset($album_db['album_id'])
-                    ? Album::getSingle(id: (int) $album_db['album_id'], pretty: false)
+                    ? Album::getById(id: (int) $album_db['album_id'], pretty: false)
                     : User::getStreamAlbum($ownerId);
                 $json_array['status_code'] = 200;
                 $json_array['success'] = [
@@ -1330,10 +1385,10 @@ return function (Handler $handler) {
                 }
                 if ($type === 'albums') {
                     $json_array['albums_old'] = [];
-                    foreach ($ids ?? [] as $album_id) {
+                    foreach ($albums_ids ?? [] as $album_id) {
                         $album_id = (int) $album_id;
                         $album_item = Album::formatArray(
-                            Album::getSingle(id: $album_id, pretty: false),
+                            Album::getById(id: $album_id, pretty: false),
                             true
                         );
                         $album_item['html'] = Listing::getAlbumHtml($album_id);
@@ -1384,7 +1439,12 @@ return function (Handler $handler) {
                     throw new Exception('Invalid content manager request', 115);
                 }
                 if (in_array($type, ['avatar', 'background'], true)) {
-                    User::deletePicture($ownerId === $logged_user['id'] ? $logged_user : $ownerId, $type);
+                    User::deletePicture(
+                        $ownerId === $logged_user['id']
+                            ? $logged_user : $ownerId,
+                        $type,
+                        $requestUser
+                    );
                     $json_array['status_code'] = 200;
                     $json_array['success'] = [
                         'message' => 'Profile background deleted',
@@ -1399,11 +1459,12 @@ return function (Handler $handler) {
                             ? $logged_user['id']
                             : $ownerId
                     );
+                    User::assertCanEdit($userTarget, $requestUser);
                     if (! TwoFactor::hasFor($userTarget)) {
                         $status_code = 403;
                         $message = 'Two-factor not enabled';
                     } else {
-                        TwoFactor::delete($userTarget);
+                        TwoFactor::delete($userTarget, $requestUser);
                         $status_code = 200;
                         $message = 'Two-factor deleted';
                     }
@@ -1421,9 +1482,10 @@ return function (Handler $handler) {
                             ? $logged_user['id']
                             : $ownerId
                     );
+                    User::assertCanEdit($userTarget, $requestUser);
                     $apiKey = ApiKey::getUserKey($userTarget);
                     if ($apiKey !== []) {
-                        ApiKey::remove(intval($apiKey['id']));
+                        ApiKey::delete(intval($apiKey['id']), $userTarget, $requestUser);
                     }
                     $json_array['status_code'] = 200;
                     $json_array['success'] = [
@@ -1441,8 +1503,15 @@ return function (Handler $handler) {
                     if ($delete_user === []) {
                         throw new Exception(_s('%s not found', _n('User', 'Users', 1)), 100);
                     }
-                    if ($delete_user['is_content_manager'] && Login::isAdmin() === false) {
-                        throw new Exception("Can't touch this!", 666);
+                    if ($delete_user['is_manager']
+                        && ! $requestUser->hasPermission(ManagerPermission::Delete)
+                    ) {
+                        throw new Exception(_s('Request denied'), 403);
+                    }
+                    if ($delete_user['is_admin']
+                        && ! $requestUser->hasPermission(AdminPermission::Delete)
+                    ) {
+                        throw new Exception(_s('Request denied'), 403);
                     }
                     User::delete($delete_user_id);
 
@@ -1489,9 +1558,13 @@ return function (Handler $handler) {
                     break;
                 }
                 if ($type === 'ip_ban') {
-                    if (! IpBan::delete([
-                        'id' => $deleting['id'],
-                    ])) {
+                    $ipBanDelete = IpBan::delete(
+                        [
+                            'id' => $deleting['id'],
+                        ],
+                        $requestUser
+                    );
+                    if (! $ipBanDelete) {
                         throw new Exception('Error deleting IP ban', 400);
                     }
 
@@ -1529,7 +1602,9 @@ return function (Handler $handler) {
                     }
                     $id = decodeID($deleting['id']);
 
-                    $content_db = $Class_fn::getSingle($id, false, false);
+                    $content_db = $Class_fn === Album::class
+                        ? Album::getById($id, false, false)
+                        : Image::getById($id, false, false);
                     if ($content_db) {
                         if (! $handler::cond('content_manager')
                             && $content_db[$db_field_prefix . '_user_id'] != $logged_user['id']
@@ -1763,9 +1838,15 @@ return function (Handler $handler) {
                     'user_id' => $logged_user['id'],
                     'followed_user_id' => decodeID($REQUEST[$doing]['id']),
                 ];
+                $followed_user = User::getSingle($follow_array['followed_user_id']);
+                if ($followed_user === []
+                    || (! (Login::isAdmin() || Login::isManager()) && $followed_user['is_private'])
+                ) {
+                    throw new Exception(_s('%s not found', _n('User', 'Users', 1)), 404);
+                }
                 $return = $doing === 'follow'
-                    ? Follow::insert($follow_array)
-                    : Follow::delete($follow_array);
+                    ? Follow::insert(...$follow_array)
+                    : Follow::delete(...$follow_array);
                 if ($return) {
                     unset($return['id']);
                     $json_array['success'] = [
@@ -1793,13 +1874,13 @@ return function (Handler $handler) {
                 $album_pub_id = $POST[$doing]['album_id'];
                 $image_id = decodeID($image_pub_id);
                 $album_id = decodeID($album_pub_id);
-                $image = Image::getSingle(id: $image_id, pretty: true);
+                $image = Image::getById(id: $image_id, pretty: true);
                 if ($image === []) {
                     throw new LogicException(
                         message('Missing image')
                     );
                 }
-                $album = Album::getSingle($album_id);
+                $album = Album::getById($album_id);
                 if ($image['album']['id'] !== ($album['id'] ?? 0)) {
                     throw new Exception(_s("%s doesn't belong to this %t", [
                         '%s' => _n('Image', 'Images', 1),
@@ -1829,12 +1910,14 @@ return function (Handler $handler) {
                 if ($logged_user === [] || ! getSetting('enable_likes')) {
                     throw new Exception('Invalid request', 403);
                 }
-                $like_array = [
-                    'user_id' => $logged_user['id'],
-                    'content_id' => decodeID($REQUEST[$doing]['id']),
-                    'content_type' => $REQUEST[$doing]['object'],
+                $likeArgs = [
+                    'contentId' => decodeID($REQUEST[$doing]['id']),
+                    'contentType' => $REQUEST[$doing]['object'],
+                    'requestUser' => $requestUser,
                 ];
-                $return = $doing === 'like' ? Like::insert($like_array) : Like::delete($like_array);
+                $return = $doing === 'like'
+                    ? Like::insert(...$likeArgs)
+                    : Like::delete(...$likeArgs);
                 if ($return) {
                     $return['id_encoded'] = encodeID((int) $return['id']);
                     unset($return['id']);
@@ -1850,9 +1933,10 @@ return function (Handler $handler) {
                 if (! Login::isAdmin()) {
                     throw new Exception('Invalid request', 403);
                 }
-                $res = Storage::regenStorageStats($REQUEST['storageId']);
+                $storageId = (int) $REQUEST['storageId'];
+                $spaceUsed = Storage::statsRebuild($storageId);
                 $json_array['success'] = [
-                    'message' => $res,
+                    'message' => sprintf('Storage %s stats re-generated (%s used)', $storageId, format_bytes($spaceUsed)),
                     'code' => 200,
                 ];
 
@@ -1956,6 +2040,9 @@ return function (Handler $handler) {
                     throw new Exception('Invalid request', 403);
                 }
                 $palette_id = (int) $REQUEST['palette_id'];
+                if (! array_key_exists($palette_id, (new Palettes())->get())) {
+                    throw new Exception('Invalid palette id', 100);
+                }
                 User::update($logged_user['id'], [
                     'palette_id' => $palette_id,
                 ]);
@@ -1999,6 +2086,19 @@ return function (Handler $handler) {
                 $user = User::getSingle($user_id);
                 if ($user === []) {
                     throw new Exception(_s('%s not found', _n('User', 'Users', 1)), 404);
+                }
+                if (! $requestUser->hasPermission(UserPermission::Edit)) {
+                    throw new Exception(code: 403);
+                }
+                if ($user['is_manager']
+                    && ! $requestUser->hasPermission(ManagerPermission::Edit)
+                ) {
+                    throw new Exception(code: 403);
+                }
+                if ($user['is_admin']
+                    && ! $requestUser->hasPermission(AdminPermission::Edit)
+                ) {
+                    throw new Exception(code: 403);
                 }
                 User::update($user_id, [
                     'status' => $doing === 'user_ban' ? 'banned' : 'valid',
@@ -2085,7 +2185,13 @@ return function (Handler $handler) {
                     if (is_array($REQUEST['values']) === false) {
                         throw new Exception('Expecting array values', 102);
                     }
-                    $import->edit($REQUEST['values']);
+                    $status = $REQUEST['values']['status'] ?? null;
+                    if (! in_array($status, ['working', 'paused', 'canceled'], true)) {
+                        throw new Exception('Invalid status value', 103);
+                    }
+                    $import->edit([
+                        'status' => $status,
+                    ]);
                     $import->get();
                     $json_array['import'] = $import->parsedImport;
                     $json_array['status_code'] = 200;

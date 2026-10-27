@@ -9,13 +9,14 @@
  * file that was distributed with this source code.
  */
 
+use Chevere\VarSupport\StorableVariable;
 use Chevereto\Legacy\Classes\DB;
 use Chevereto\Legacy\Classes\Login;
 use Chevereto\Legacy\Classes\Settings;
 use Chevereto\Legacy\Classes\User;
 use Chevereto\Legacy\Classes\Variable;
 use Chevereto\Legacy\G\Handler;
-use function Chevere\Filesystem\filePhpForPath;
+use function Chevere\Filesystem\filePhpReturnForPath;
 use function Chevere\Message\message;
 use function Chevere\Parameter\getType;
 use function Chevere\Standard\randomString;
@@ -717,7 +718,7 @@ $settings_updates = [
     ],
     '4.5.6' => null,
     '4.5.7' => null,
-    // '5.0.0' => null,
+    '4.5.8' => null,
 ];
 
 /**
@@ -2655,32 +2656,22 @@ if ($installed_version === '' && ! empty($params)) {
                     $error_message = sprintf($db_conn_error, $e->getMessage());
                 }
                 if (! $error) {
-                    $env = [];
-                    $env['%encryptionKey%'] = randomKey()->base64();
-                    foreach ($db_details as $k => $v) {
-                        $env["%{$k}%"] = $v;
-                    }
-                    $dotenvTemplate = <<<EOT
-<?php
-
-return [
-    'CHEVERETO_DB_HOST' => '%host%',
-    'CHEVERETO_DB_NAME' => '%name%',
-    'CHEVERETO_DB_PASS' => '%pass%',
-    'CHEVERETO_DB_PORT' => '%port%',
-    'CHEVERETO_DB_USER' => '%user%',
-    'CHEVERETO_DB_TABLE_PREFIX' => '%tablePrefix%',
-    'CHEVERETO_ENCRYPTION_KEY' => '%encryptionKey%',
-];
-
-EOT;
-                    $envDotPhpContents = strtr($dotenvTemplate, $env);
+                    $env = [
+                        'CHEVERETO_DB_HOST' => (string) ($db_details['host'] ?? ''),
+                        'CHEVERETO_DB_NAME' => (string) ($db_details['name'] ?? ''),
+                        'CHEVERETO_DB_PASS' => (string) ($db_details['pass'] ?? ''),
+                        'CHEVERETO_DB_PORT' => (int) ($db_details['port'] ?? 3306),
+                        'CHEVERETO_DB_USER' => (string) ($db_details['user'] ?? ''),
+                        'CHEVERETO_DB_TABLE_PREFIX' => (string) ($db_details['tablePrefix'] ?? ''),
+                        'CHEVERETO_ENCRYPTION_KEY' => randomKey()->base64(),
+                    ];
 
                     try {
-                        $envDotPhp = filePhpForPath(PATH_APP . 'env.php');
-                        $envDotPhp->file()->removeIfExists();
-                        $envDotPhp->file()->create();
-                        $envDotPhp->file()->put($envDotPhpContents);
+                        $envDotPhpReturn = filePhpReturnForPath(PATH_APP . 'env.php');
+                        $envDotPhpReturn->filePhp()->file()->removeIfExists();
+                        $envDotPhpReturn->filePhp()->file()->create();
+                        $envDotPhpReturn
+                            ->put(new StorableVariable($env));
                         $doing = 'ready';
                     } catch (Throwable) {
                         $doing = 'env';

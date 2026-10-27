@@ -11,6 +11,7 @@
 
 namespace Chevereto\Legacy\Classes;
 
+use Chevereto\Http\RequestUser;
 use InvalidArgumentException;
 use OutOfRangeException;
 use Throwable;
@@ -118,11 +119,16 @@ class ApiKey
         return $key;
     }
 
-    public static function remove(int $id): void
+    public static function delete(int $id, int $userId, RequestUser $requestUser): void
     {
-        DB::delete('api_keys', [
-            'id' => $id,
-        ]);
+        User::assertCanEdit($userId, $requestUser);
+        DB::delete(
+            'api_keys',
+            [
+                'id' => $id,
+                'user_id' => $userId,
+            ]
+        );
     }
 
     public static function has(int $userId): bool

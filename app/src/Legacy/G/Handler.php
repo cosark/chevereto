@@ -16,7 +16,6 @@ use Closure;
 use Exception;
 use LogicException;
 use Throwable;
-use function Chevere\Message\message;
 use function Chevereto\Legacy\get_captcha_component;
 use function Chevereto\Legacy\getSetting;
 use function Chevereto\Legacy\headersNoCache;
@@ -260,40 +259,52 @@ class Handler
         self::$prevented_route = true;
     }
 
-    public function getRouteFn(string $route_name): callable
+    public function getRouteFn(string $routeName): ?callable
     {
-        if (array_key_exists($route_name, self::$routes)) {
-            return self::$routes[$route_name];
+        if (array_key_exists($routeName, self::$routes)) {
+            return self::$routes[$routeName];
         }
-        $filename = $route_name . '.php';
-        $route_file = PATH_APP_LEGACY_ROUTES . $filename;
-        $route_override_file = PATH_APP_LEGACY_ROUTES_OVERRIDES . $filename;
-        if (file_exists($route_override_file)) {
-            $route_file = $route_override_file;
+        $routeFile = '';
+        if (self::isValidPathSegment($routeName)) {
+            $filename = $routeName . '.php';
+            $routeOverrideFile = PATH_APP_LEGACY_ROUTES_OVERRIDES . $filename;
+            $routeFile = file_exists($routeOverrideFile)
+                ? $routeOverrideFile
+                : PATH_APP_LEGACY_ROUTES . $filename;
         }
-        if (! file_exists($route_file)) {
-            $route_name = getSetting('root_route');
-            $route_file = PATH_APP_LEGACY_ROUTES . $route_name . '.php';
-            $this->template = $route_name;
+        if ($routeFile === '' || ! file_exists($routeFile)) {
+            $routeName = (string) getSetting('root_route');
+            if (! self::isValidPathSegment($routeName)) {
+                return null;
+            }
+            $routeFile = PATH_APP_LEGACY_ROUTES . $routeName . '.php';
+            $this->template = $routeName;
         }
-        if (file_exists($route_file)) {
-            /** @var callable $route */
-            $route = require $route_file;
-            self::$routes[$route_name] = $route;
-            self::$route_name = $route_name;
+        if (file_exists($routeFile)) {
+            $route = require $routeFile;
+            if (! is_callable($route)) {
+                throw new LogicException(
+                    sprintf(
+                        'Route `%s` is not callable',
+                        $routeName,
+                    )
+                );
+            }
+            self::$routes[$routeName] = $route;
+            self::$route_name = $routeName;
 
             return $route;
         }
 
         throw new LogicException(
-            message(
-                'Missing route file `%file%`',
-                file: $route_file,
+            sprintf(
+                'Missing route file `%s`',
+                $routeFile,
             )
         );
     }
 
-    public function mapRoute(string $route_name, ?array $args = null): callable
+    public function mapRoute(string $route_name, ?array $args = null): ?callable
     {
         $this->template = $route_name;
         self::$base_request = $route_name;
@@ -430,13 +441,15 @@ class Handler
         return self::$route_name;
     }
 
+    public static function isValidPathSegment(string $routeName): bool
+    {
+        return preg_match('/^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*$/D', $routeName) === 1;
+    }
+
     private function processRequest(): void
     {
         $route = $this->getRouteFn(self::$base_request);
-        if (is_callable($route)) {
-            $routes[self::$base_request] = $route;
-        }
-        if (is_array($routes) && array_key_exists(self::$base_request, $routes)) {
+        if ($route) {
             $magic = [
                 'post' => post() ?: null,
                 'get' => get() ?: null,
@@ -450,10 +463,8 @@ class Handler
             self::$vars = self::$vars !== []
                     ? array_merge(self::$vars, $magic)
                     : $magic;
-            if (! self::$prevented_route
-                && is_callable($routes[self::$base_request]) // @phpstan-ignore-line
-            ) {
-                $routes[self::$base_request]($this);
+            if (! self::$prevented_route) {
+                $route($this);
             }
         } else {
             $this->issueError(404);

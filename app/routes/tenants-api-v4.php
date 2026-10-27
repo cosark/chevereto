@@ -67,7 +67,12 @@ return routes(
 )
     ->withAppendMiddleware(
         RestrictIpAccess::with(
-            allowList: env()['CHEVERETO_TENANTS_API_IP_ALLOW_LIST']
+            ...array_filter(
+                array_map(
+                    'trim',
+                    explode(',', env()['CHEVERETO_TENANTS_API_IP_ALLOW_LIST'])
+                )
+            )
         ),
         TenantsApiKeyAuthorization::class,
         SignedRequest::with(

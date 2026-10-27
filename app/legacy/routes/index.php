@@ -89,7 +89,7 @@ return function (Handler $handler) {
                     $image = false;
                 } else {
                     $imageId = (int) $fetch['image_id'];
-                    $image = Image::getSingle(id: $imageId, pretty: true);
+                    $image = Image::getById(id: $imageId, pretty: true);
                     if (! isset($image['file_resource']['chain']['image'])) {
                         $image = false;
                     }

@@ -133,11 +133,14 @@ return function (Handler $handler) {
         if ($source === null) {
             throw new Exception('Empty upload source', 130);
         }
+        $isFiles = true;
         switch (true) {
             case isset($FILES['source'], $FILES['source']['tmp_name']):
                 $source = $FILES['source'];
 
                 break;
+            case ! is_string($source):
+                throw new Exception('Invalid upload source', 130);
             case is_image_url($source) || is_url($source):
                 if (($SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
                     $sourceQs = urldecode(getQsParams()['source']);
@@ -175,6 +178,7 @@ return function (Handler $handler) {
                     'error' => 'UPLOAD_ERR_OK',
                     'size' => filesize($api_temp_file),
                 ];
+                $isFiles = false;
 
                 break;
         }
@@ -215,9 +219,10 @@ return function (Handler $handler) {
                 source_db: $user_source_db
             );
         }
-        $uploadToWebsite = Image::uploadToWebsite($source, $user, $params);
+        $type = is_string($source) ? 'url' : 'file';
+        $uploadToWebsite = Image::uploadToWebsite($type, $source, $user, $params, isFiles: $isFiles);
         $uploaded_id = intval($uploadToWebsite[0]);
-        $image = Image::formatArray(Image::getSingle($uploaded_id), true);
+        $image = Image::formatArray(Image::getById($uploaded_id), true);
         $image['delete_url'] = Image::getDeleteUrl(
             type: $image['type'],
             idEncoded: encodeID($uploaded_id),

@@ -14,6 +14,7 @@ use Chevereto\Http\Middlewares\RestrictIpAccess;
 use Chevereto\Http\Middlewares\TenantsApiKeyAuthorization;
 use function Chevere\Router\route;
 use function Chevere\Router\routes;
+use function Chevereto\Legacy\privateTrustedProxies;
 
 return routes(
     route(
@@ -23,7 +24,7 @@ return routes(
 )
     ->withAppendMiddleware(
         RestrictIpAccess::with(
-            allowList: '127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16',
+            ...privateTrustedProxies()
         ),
         TenantsApiKeyAuthorization::class,
     );

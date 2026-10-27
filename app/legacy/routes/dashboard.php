@@ -31,6 +31,7 @@ use Chevereto\Legacy\Classes\StorageApis;
 use Chevereto\Legacy\Classes\Upload;
 use Chevereto\Legacy\Classes\User;
 use Chevereto\Legacy\G\Handler;
+use Chevereto\PCRE;
 use FFMpeg\FFMpeg;
 use FFMpeg\FFProbe;
 use Intervention\Image\ImageManagerStatic;
@@ -39,6 +40,7 @@ use Symfony\Component\Mailer\Transport\Smtp\SmtpTransport;
 use function Chevere\Standard\randomString;
 use function Chevereto\Encryption\hasEncryption;
 use function Chevereto\Legacy\badgePaid;
+use function Chevereto\Legacy\checkUpdates;
 use function Chevereto\Legacy\cheveretoVersionInstalled;
 use function Chevereto\Legacy\editionCombo;
 use function Chevereto\Legacy\G\abbreviate_number;
@@ -88,19 +90,42 @@ use function Chevereto\Vars\session;
 use function Chevereto\Vars\sessionVar;
 
 return function (Handler $handler) {
+    $doing = $handler->request()[0] ?? 'stats';
     $POST = post();
     if ($POST !== [] && ! $handler::checkAuthToken(request()['auth_token'] ?? '')) {
         $handler->issueError(403);
 
         return;
     }
+    $logged_user = Login::getUser();
+    if ($logged_user === []) {
+        redirect('login', 302);
+    }
+    if ($doing === 'user' && $handler::cond('content_manager')) {
+        $route = $handler->getRouteFn('settings');
+        $handler::setCond('dashboard_user', true);
+
+        return $route($handler);
+    }
+    if (! $logged_user['is_admin']) {
+        $handler->issueError(404);
+
+        return;
+    }
     if (env()['CHEVERETO_CONTEXT'] !== 'saas'
-        && ($handler->request()[0] ?? null) === 'upgrade'
+        && env()['CHEVERETO_SERVICING'] === 'server'
+        && $doing === 'upgrade'
+        && $logged_user['is_admin']
     ) {
         if (! $handler::checkAuthToken(request()['auth_token'] ?? '')) {
-            $handler->issueError(403);
+            $handler->issueError(404); // Don't disclose CHEVERETO_SERVICING
 
             return;
+        }
+
+        try {
+            checkUpdates();
+        } catch (Throwable) {
         }
         $upgradingDir = PATH_APP . '.upgrading/';
         if (! is_dir($upgradingDir)) {
@@ -122,20 +147,6 @@ return function (Handler $handler) {
         ];
         $query = http_build_query($params);
         redirect(get_base_url('upgrading/?' . $query), 302);
-    }
-    $doing = $handler->request()[0] ?? 'stats';
-    $logged_user = Login::getUser();
-    if ($logged_user === []) {
-        redirect('login', 302);
-    }
-    if ($doing === 'user' && $handler::cond('content_manager')) {
-        $route = $handler->getRouteFn('settings');
-        $handler::setCond('dashboard_user', true);
-
-        return $route($handler);
-    }
-    if (! $logged_user['is_admin']) {
-        $handler->issueError(404);
 
         return;
     }
@@ -1253,6 +1264,7 @@ return function (Handler $handler) {
                 if (env()['CHEVERETO_SERVICING'] !== 'docker') {
                     $mailApis[] = 'mail';
                 }
+                $routeErrorMessage = _s('Only alphanumeric, hyphen and underscore characters are allowed');
                 $validations = [
                     'website_name' => [
                         'validate' => isset($POST['website_name']),
@@ -1308,7 +1320,9 @@ return function (Handler $handler) {
                         'error_msg' => _s('Invalid watermark opacity'),
                     ],
                     'theme' => [
-                        'validate' => isset($POST['theme']) && file_exists(PATH_PUBLIC_CONTENT_LEGACY_THEMES . $POST['theme']),
+                        'validate' => isset($POST['theme'])
+                            && $handler::isValidPathSegment($POST['theme'])
+                            && is_dir(PATH_PUBLIC_CONTENT_LEGACY_THEMES . $POST['theme']),
                         'error_msg' => _s('Invalid theme'),
                     ],
                     'theme_logo_height' => [
@@ -1424,16 +1438,29 @@ return function (Handler $handler) {
                         'error_msg' => _s('Invalid user minimum age'),
                     ],
                     'route_image' => [
-                        'validate' => isset($POST['route_image']) && preg_match('/^[\w\d\-\_]+$/', $POST['route_image']),
-                        'error_msg' => _s('Only alphanumeric, hyphen and underscore characters are allowed'),
+                        'validate' => isset($POST['route_image'])
+                            && PCRE::RouteName->regex()->match($POST['route_image']),
+                        'error_msg' => $routeErrorMessage,
                     ],
                     'route_album' => [
-                        'validate' => isset($POST['route_album']) && preg_match('/^[\w\d\-\_]+$/', $POST['route_album']),
-                        'error_msg' => _s('Only alphanumeric, hyphen and underscore characters are allowed'),
+                        'validate' => isset($POST['route_album'])
+                            && PCRE::RouteName->regex()->match($POST['route_album']),
+                        'error_msg' => $routeErrorMessage,
                     ],
                     'route_user' => [
-                        'validate' => isset($POST['route_user']) && preg_match('/^[\w\d\-\_]+$/', $POST['route_user']),
-                        'error_msg' => _s('Only alphanumeric, hyphen and underscore characters are allowed'),
+                        'validate' => isset($POST['route_user'])
+                            && PCRE::RouteName->regex()->match($POST['route_user']),
+                        'error_msg' => $routeErrorMessage,
+                    ],
+                    'route_video' => [
+                        'validate' => isset($POST['route_video'])
+                            && PCRE::RouteName->regex()->match($POST['route_video']),
+                        'error_msg' => $routeErrorMessage,
+                    ],
+                    'route_audio' => [
+                        'validate' => isset($POST['route_audio'])
+                            && PCRE::RouteName->regex()->match($POST['route_audio']),
+                        'error_msg' => $routeErrorMessage,
                     ],
                     'image_load_max_filesize_mb' => [
                         'validate' => isset($POST['image_load_max_filesize_mb']) && $POST['image_load_max_filesize_mb'] !== '' ? is_numeric($POST['image_load_max_filesize_mb']) : true,
@@ -1469,6 +1496,11 @@ return function (Handler $handler) {
                             : true,
                         'error_msg' => _s('Invalid key'),
                     ],
+                    'root_route' => [
+                        'validate' => ! isset($POST['root_route'])
+                            || in_array($POST['root_route'], ['image', 'album', 'user'], true),
+                        'error_msg' => _s('Invalid value'),
+                    ],
                 ];
                 if (Config::enabled()->phpPages()) {
                     $validations['page_file_path'] = [
@@ -1477,7 +1509,7 @@ return function (Handler $handler) {
                     ];
                 }
                 $customRoutes = [];
-                foreach (['image', 'album', 'user'] as $test) {
+                foreach (['image', 'album', 'user', 'video', 'audio'] as $test) {
                     $tryValue = $POST['route_' . $test] ?? null;
                     if ($tryValue !== null) {
                         if (in_array($tryValue, $customRoutes, true)) {
@@ -1566,9 +1598,9 @@ return function (Handler $handler) {
                         ];
                     }
                 }
-                foreach (['image', 'album'] as $k) {
+                foreach (['image', 'album', 'user', 'video', 'audio'] as $k) {
                     $route = 'route_' . $k;
-                    if (! isset($POST[$route])) {
+                    if (! isset($POST[$route]) || ! $validations[$route]['validate']) {
                         continue;
                     }
                     if (file_exists(PATH_PUBLIC . $POST[$route])) {
@@ -1661,7 +1693,30 @@ return function (Handler $handler) {
                 foreach (getSetting('homepage_cover_images') ?? [] as $k => $v) {
                     $content_image_props[] = sprintf('homepage_cover_image_%s', $k);
                 }
-                $content_image_props = array_merge($content_image_props, ['logo_vector', 'logo_image', 'favicon_image', 'watermark_image', 'consent_screen_cover_image', 'homepage_cover_image_add']);
+                $content_image_props = array_merge(
+                    $content_image_props,
+                    [
+                        'logo_vector',
+                        'logo_image',
+                        'favicon_image',
+                        'watermark_image',
+                        'consent_screen_cover_image',
+                        'homepage_cover_image_add',
+                    ]
+                );
+                $tamperedContentImageProps = false;
+                foreach ($content_image_props as $k) {
+                    if (array_key_exists($k, $POST)) {
+                        $tamperedContentImageProps = true;
+                        $validations[$k] = [
+                            'validate' => false,
+                            'error_msg' => _s('Invalid value'),
+                        ];
+                    }
+                }
+                if ($tamperedContentImageProps) {
+                    $content_image_props = [];
+                }
                 foreach ($content_image_props as $k) {
                     if (! empty(files()[$k]['tmp_name'])) {
                         try {
@@ -2028,7 +2083,18 @@ return function (Handler $handler) {
                         }
                     } else { // Settings
                         $update_settings = [];
-                        foreach (array_keys(getSettings()) as $k) {
+                        $skip_settings = [
+                            'homepage_cover_image',
+                            'logo_image_homepage',
+                            'logo_vector_homepage',
+                            'logo_vector',
+                            'logo_image',
+                            'favicon_image',
+                            'watermark_image',
+                            'consent_screen_cover_image',
+                        ];
+                        $settingsKeys = array_diff(array_keys(getSettings()), $skip_settings);
+                        foreach ($settingsKeys as $k) {
                             $kValue = is_bool(getSetting($k))
                                 ? (getSetting($k) ? 1 : 0)
                                 : getSetting($k);

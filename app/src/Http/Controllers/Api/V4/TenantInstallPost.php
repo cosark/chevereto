@@ -90,9 +90,9 @@ class TenantInstallPost extends Controller
     public static function acceptBody(): ParameterInterface
     {
         return arrayp(
-            username: string(PCRE::USER_USERNAME->value),
-            email: string(PCRE::USER_EMAIL->value),
-            password: string(PCRE::USER_PASSWORD->value),
+            username: string(PCRE::Username->value),
+            email: string(PCRE::UserEmail->value),
+            password: string(PCRE::UserPassword->value),
         );
     }
 }

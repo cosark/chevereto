@@ -12,6 +12,7 @@
 namespace Chevereto\Legacy\Classes;
 
 use Exception;
+use InvalidArgumentException;
 use LogicException;
 use Throwable;
 use function Chevereto\Encryption\decodeDecrypt;
@@ -97,7 +98,7 @@ class Album
         'password',
     ];
 
-    public static function getSingle(
+    public static function getById(
         int $id,
         bool $sumView = false,
         bool $pretty = true,
@@ -159,7 +160,7 @@ class Album
         }
 
         return $pretty
-            ? self::formatArray($album_db, fillCover: false)
+            ? self::formatArray($album_db)
             : self::cipherAwareDbRow($album_db);
     }
 
@@ -207,7 +208,7 @@ class Album
     public static function sumView(int $id, array $album = []): void
     {
         if (($album['id'] ?? 0) !== $id) {
-            $album = self::getSingle($id);
+            $album = self::getById($id);
             if ($album === []) {
                 throw new Exception(sprintf('Invalid album id %s', $id), 600);
             }
@@ -307,12 +308,12 @@ class Album
             'parent_id' => $values['parent_id'] ?? null,
         ];
         if ($album_array['parent_id']) {
-            $parent = self::getSingle($album_array['parent_id'], false, false, []);
-            if ($parent === []) {
-                throw new Exception('Invalid parent album', 600);
+            $parent = self::getAlbum((int) $album_array['parent_id']);
+            if ($parent === null) {
+                throw new Exception('Invalid parent album', 404);
             }
-            if ($album_array['user_id'] !== $parent['album_user_id']) {
-                $album_array['user_id'] = $parent['album_user_id'];
+            if ($album_array['user_id'] !== $parent['user_id']) {
+                throw new Exception('Invalid parent album owner', 403);
             }
         }
         $insert = DB::insert('albums', $album_array);
@@ -323,6 +324,7 @@ class Album
                 'id' => $values['user_id'],
             ]);
             User::deleteAlbumsCache($values['user_id']);
+            Listing::deleteTypeIdCache('u', $values['user_id']);
         }
 
         Stat::track([
@@ -392,7 +394,7 @@ class Album
                 _s("The %s %i can't be moved into one of its sub %t.", [
                     '%s' => _n('album', 'albums', count($rows)),
                     '%i' => $childrenNames,
-                    '%t' => _n('album', 'albums', 20),
+                    '%t' => _s('Albums'),
                 ]),
                 100
             );
@@ -407,7 +409,33 @@ class Album
         }
         $db = DB::getInstance();
         $albumsTable = DB::getTable('albums');
-        $IdsString = implode(',', $ids);
+        $IdsString = implode(',', array_map('intval', $ids));
+        if ($to !== null) {
+            $targetAlbum = self::getAlbum($to);
+            if (! $targetAlbum) {
+                throw new InvalidArgumentException(
+                    'Target album does not exist',
+                    404
+                );
+            }
+            $db->query(
+                <<<SQL
+                SELECT COUNT(*) count
+                FROM {$albumsTable}
+                WHERE album_id IN ({$IdsString})
+                AND (album_user_id IS NULL OR album_user_id <> :parent_album_user_id);
+
+                SQL
+            );
+            $db->bind(':parent_album_user_id', $targetAlbum['user_id']);
+            $mismatch = (int) ($db->fetchSingle()['count'] ?? 0);
+            if ($targetAlbum['user_id'] === null || $mismatch > 0) {
+                throw new InvalidArgumentException(
+                    "Can't move content between different users",
+                    422
+                );
+            }
+        }
         $db->query(
             <<<SQL
             UPDATE {$albumsTable}
@@ -423,25 +451,31 @@ class Album
             if ($userId) {
                 User::deleteAlbumsCache($userId);
             }
+            // TODO: Update album listing cache
+            Listing::deleteTypeIdCache('a', ...$ids);
         }
 
         return $return;
     }
 
-    public static function addImage(int $album_id, int $id)
-    {
-        return self::addImages($album_id, [$id]);
-    }
-
-    public static function addImages(?int $album_id, array $ids)
+    public static function addImages(?int $albumId, ?int $userId, int ...$ids): bool
     {
         if ($ids === []) {
-            throw new Exception('Empty ids provided', 600);
+            throw new Exception('Empty ids provided', 400);
+        }
+        if ($albumId !== null && self::getUser($albumId) !== $userId) {
+            throw new Exception('Album owner mismatch', 403);
         }
         $images = Image::getMultiple($ids, true);
+        if ($images === []) {
+            throw new Exception('No images found for the provided ids', 404);
+        }
         $albums = [];
         foreach ($images as $k => $v) {
-            if (isset($v['album']['id']) && $v['album']['id'] !== $album_id) {
+            if (($v['user']['id'] ?? null) !== $userId) {
+                throw new Exception('Image owner mismatch', 403);
+            }
+            if (isset($v['album']['id']) && $v['album']['id'] !== $albumId) {
                 $album_k = $v['album']['id'];
                 if (! array_key_exists($album_k, $albums)) {
                     $albums[$album_k] = [];
@@ -450,33 +484,59 @@ class Album
             }
         }
         $db = DB::getInstance();
-        $db->query('UPDATE `' . DB::getTable('images') . '` SET `image_album_id`=:image_album_id WHERE `image_id` IN (' . implode(',', $ids) . ')');
-        $db->bind(':image_album_id', $album_id);
+        $tableImages = DB::getTable('images');
+        $tableAlbums = DB::getTable('albums');
+        $implodeIds = implode(',', $ids);
+        $db->query(
+            <<<SQL
+            UPDATE `{$tableImages}`
+            SET `image_album_id`=:image_album_id
+            WHERE `image_id` IN ({$implodeIds})
+            AND `image_user_id` <=> :image_user_id
+            SQL
+        );
+        $db->bind(':image_album_id', $albumId);
+        $db->bind(':image_user_id', $userId);
         $exec = $db->exec();
         if ($exec && $db->rowCount() > 0) {
-            if ($album_id !== null) {
-                self::updateImageCount($album_id, $db->rowCount());
+            Listing::deleteTypeIdCache('i', ...$ids);
+            $albumsId = [];
+            if ($albumId !== null) {
+                self::updateImageCount($albumId, $db->rowCount());
+                $albumsId[] = $albumId;
             }
             if ($albums !== []) {
                 $album_query = '';
-                $album_query_tpl = 'UPDATE `' . DB::getTable('albums') . '` SET `album_image_count` = GREATEST(`album_image_count` - :counter, 0) WHERE `album_id` = :album_id;';
+                $album_query_tpl = <<<SQL
+                UPDATE `{$tableAlbums}`
+                SET `album_image_count` = GREATEST(CAST(`album_image_count` AS SIGNED) - :counter, 0)
+                WHERE `album_id` = :album_id;
+                SQL;
                 foreach ($albums as $k => $v) {
                     $album_query .= strtr($album_query_tpl, [
                         ':counter' => count($v),
                         ':album_id' => $k,
                     ]);
+                    $albumsId[] = $k;
                 }
                 $db = DB::getInstance();
                 $db->query($album_query);
                 $db->exec();
             }
+            Listing::deleteTypeIdCache('a', ...$albumsId);
         }
         $db = DB::getInstance();
-        $db->query('UPDATE `' . DB::getTable('albums') . '` SET `album_cover_id` = NULL WHERE `album_cover_id` IN(' . implode(',', $ids) . ');');
+        $db->query(
+            <<<SQL
+            UPDATE `{$tableAlbums}`
+            SET `album_cover_id` = NULL
+            WHERE `album_cover_id` IN({$implodeIds});
+            SQL
+        );
         $db->exec();
-        $album = self::getSingle((int) $album_id);
-        if (! isset($album['cover_id']) && is_int($album_id)) {
-            self::populateCover($album_id);
+        $album = self::getById((int) $albumId);
+        if (! isset($album['cover_id']) && is_int($albumId)) {
+            self::populateCover($albumId);
         }
 
         return $exec;
@@ -502,6 +562,7 @@ class Album
             if ($userId) {
                 User::deleteAlbumsCache($userId);
             }
+            Listing::deleteTypeIdCache('a', $id);
         }
 
         return $return;
@@ -512,15 +573,17 @@ class Album
         $db = DB::getInstance();
         $table_albums = DB::getTable('albums');
         $table_images = DB::getTable('images');
-        $db->query(<<<SQL
-        UPDATE `{$table_albums}`
-        SET album_cover_id = COALESCE(
-            album_cover_id,
-            (SELECT image_id FROM `{$table_images}` WHERE image_album_id = album_id AND image_is_approved = 1 ORDER BY image_id DESC LIMIT 1),
-            NULL
-        )
-        WHERE album_id = :album_id AND album_cover_id IS NULL;
-        SQL);
+        $db->query(
+            <<<SQL
+            UPDATE `{$table_albums}`
+            SET album_cover_id = COALESCE(
+                album_cover_id,
+                (SELECT image_id FROM `{$table_images}` WHERE image_album_id = album_id AND image_is_approved = 1 ORDER BY image_id DESC LIMIT 1),
+                NULL
+            )
+            WHERE album_id = :album_id AND album_cover_id IS NULL;
+            SQL
+        );
         $db->bind(':album_id', $id);
         $db->exec();
     }
@@ -531,7 +594,7 @@ class Album
         $userId = DB::get('albums', [
             'id' => $id,
         ])[0]['album_user_id'] ?? null;
-        $album = self::getSingle($id);
+        $album = self::getById($id);
         if ($album === []) {
             return 0;
         }
@@ -596,29 +659,39 @@ class Album
 
     public static function updateImageCount(int $id, int $counter = 1, string $operator = '+')
     {
-        $query = 'UPDATE `' . DB::getTable('albums') . '` SET `album_image_count` = ';
+        $tableAlbums = DB::getTable('albums');
+        $query = <<<SQL
+        UPDATE `{$tableAlbums}`
+        SET `album_image_count` =
+        SQL;
         if (in_array($operator, ['+', '-'], true)) {
-            $query .= 'GREATEST(`album_image_count` ' . $operator . ' ' . $counter . ', 0)';
+            $query .= <<<SQL
+             GREATEST(CAST(`album_image_count` AS SIGNED) {$operator} :counter, 0)
+            SQL;
         } else {
-            $query .= $counter;
+            $query .= <<<SQL
+             :counter
+            SQL;
         }
-        $query .= ' WHERE `album_id` = :album_id';
+        $query .= <<<SQL
+
+        WHERE `album_id` = :album_id
+        SQL;
         $db = DB::getInstance();
         $db->query($query);
         $db->bind(':album_id', $id);
+        $db->bind(':counter', $counter);
 
         return $db->exec();
     }
 
-    public static function fill(array &$album, array &$user = [], bool $fillCover = true)
+    public static function fill(array &$album, array &$user = [])
     {
         static::fillEssential($album, $user);
         if (! empty($user)) {
             User::fill($user);
         }
         $display_url = $album['display_url'] ?? '';
-        $display_width = $album['display_width'] ?? '';
-        $display_height = $album['display_height'] ?? '';
         if (! empty($album['cover_id'])) {
             $album['cover_id_encoded'] = encodeID((int) $album['cover_id']);
         }
@@ -626,11 +699,8 @@ class Album
             $album['parent_id_encoded'] = encodeID((int) $album['parent_id']);
         }
         $album['display_url'] = $display_url;
-        $album['display_width'] = $display_width;
-        $album['display_height'] = $display_height;
-        if (! isset($album['date_gmt'])) {
-            $album['date_gmt'] = $user['date_gmt'] ?? datetimegmt();
-        }
+        $album['date'] ??= $user['date'] ?? datetimegmt();
+        $album['date_gmt'] ??= $user['date_gmt'] ?? datetimegmt();
         $album['date_fixed_peer'] = Login::isLoggedUser()
             ? datetimegmt_convert_tz($album['date_gmt'], Login::getUser()['timezone'])
             : $album['date_gmt'];
@@ -666,6 +736,7 @@ class Album
             STRING;
         }
         $album['cta'] = $album['cta'] ?? '[]';
+        $album['how_long_ago'] = time_elapsed_string($album['date_gmt'] ?? '');
     }
 
     public static function fillEssential(array &$album, array &$user = []): void
@@ -734,16 +805,15 @@ class Album
         return $row;
     }
 
-    public static function formatArray(array $row, bool $safe = false, bool $fillCover = true): array
+    public static function formatArray(array $row, bool $safe = false): array
     {
         self::cipherAwareDbRow($row);
         $output = DB::formatRow($row);
         if (! isset($output['user'])) {
             $output['user'] = [];
         }
-        self::fill($output, $output['user'], $fillCover);
+        self::fill($output, $output['user']);
         $output['views_label'] = _n('view', 'views', $output['views'] ?? 0);
-        $output['how_long_ago'] = time_elapsed_string($output['date_gmt'] ?? '');
         if (isset($output['images_slice'])) {
             foreach ($output['images_slice'] as &$v) {
                 $v = Image::formatArray($v, $safe);
@@ -752,6 +822,8 @@ class Album
         }
         if ($safe) {
             unset(
+                $output['creation_ip'],
+                $output['password'],
                 $output['id'],
                 $output['privacy_extra'],
                 $output['cover_id'],
@@ -867,20 +939,27 @@ class Album
         ];
 
         try {
-            $db = DB::getInstance();
-            $flood_db = $db->queryFetchSingle(
-                'SELECT
-			COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MINUTE), 1, NULL)) AS minute,
-			COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR), 1, NULL)) AS hour,
-			COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY), 1, NULL)) AS day,
-			COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 WEEK), 1, NULL)) AS week,
-			COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH), 1, NULL)) AS month
-			FROM ' . DB::getTable('albums') . " WHERE album_creation_ip='" . get_client_ip() . "' AND album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH)"
+            $query = <<<SQL
+            SELECT
+                COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MINUTE), 1, NULL)) AS minute,
+                COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR), 1, NULL)) AS hour,
+                COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY), 1, NULL)) AS day,
+                COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 WEEK), 1, NULL)) AS week,
+                COUNT(IF(album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH), 1, NULL)) AS month
+            FROM `%table_prefix%albums`
+            WHERE album_creation_ip = :ip
+                AND album_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MONTH);
+            SQL;
+            $flood_db = DB::fetchSingleQuery(
+                $query,
+                [
+                    ':ip' => get_client_ip(),
+                ]
             );
-        } catch (Exception) {
-            $flood_db = false;
-        } // Silence
-        if ($flood_db === false) {
+        } catch (Throwable) {
+            $flood_db = [];
+        }
+        if ($flood_db === []) {
             return [];
         }
         $is_flood = false;
@@ -928,16 +1007,34 @@ class Album
         return [];
     }
 
+    private static function getAlbum(int $id): ?array
+    {
+        $db = DB::getInstance();
+        $tableAlbums = DB::getTable('albums');
+        $db->query(
+            <<<SQL
+            SELECT album_id AS id,
+                album_name AS name,
+                album_user_id AS user_id
+            FROM {$tableAlbums}
+            WHERE album_id = :album_id;
+            SQL
+        );
+        $db->bind(':album_id', $id);
+
+        return $db->fetchSingle() ?: null;
+    }
+
     private static function getUser(int $id): ?int
     {
         $db = DB::getInstance();
         $tableAlbums = DB::getTable('albums');
         $db->query(
-            <<<MySQL
+            <<<SQL
             SELECT album_user_id
             FROM {$tableAlbums}
             WHERE album_id = :album_id;
-            MySQL
+            SQL
         );
         $db->bind(':album_id', $id);
         $fetchSingle = $db->fetchSingle();

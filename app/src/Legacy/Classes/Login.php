@@ -11,7 +11,9 @@
 
 namespace Chevereto\Legacy\Classes;
 
+use Chevere\Authorization\Interfaces\RolesMaskInterface;
 use Chevereto\Config\Config;
+use Chevereto\Http\RequestUser;
 use Exception;
 use InvalidArgumentException;
 use LogicException;
@@ -110,6 +112,13 @@ class Login
     protected static bool $isPi;
 
     protected static bool $isMacanudo;
+
+    protected static RolesMaskInterface $rolesMask;
+
+    public function __construct(RolesMaskInterface $rolesMask)
+    {
+        self::$rolesMask = $rolesMask;
+    }
 
     public static function isPi(): bool
     {
@@ -547,6 +556,22 @@ class Login
     public static function getUser(): array
     {
         return self::$logged_user;
+    }
+
+    public static function getRequestUser(): RequestUser
+    {
+        static $cache = [];
+        $id = self::$logged_user['id'] ?? 0;
+        $roleBitmask = self::$logged_user['role_bitmask'] ?? 0;
+        $cacheKey = "{$id}:{$roleBitmask}";
+
+        return $cache[$cacheKey]
+            ??= new RequestUser(
+                roles: self::$rolesMask->roles()->forMask($roleBitmask),
+                id: self::$logged_user['id'] ?? 0,
+                ipAddress: get_client_ip(),
+                status: self::$logged_user['status'] ?? '',
+            );
     }
 
     public static function setUser(string $key, mixed $value)

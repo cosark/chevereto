@@ -25,8 +25,9 @@ document.addEventListener("DOMContentLoaded",
     function() {
         var removals = [
             "input#form-storage-name",
-            "input#form-storage-capacity",
-            "input#storage_type_enable_image",
+            "input#form-storage-capacity_formatted",
+            "input#form-storage-is_image",
+            "input#form-storage-is_video",
         ];
         $.each(removals, function(i, v){
             $(v).closest('.input-label').remove();

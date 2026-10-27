@@ -9,13 +9,15 @@
  * file that was distributed with this source code.
  */
 
+use Chevere\Authorization\RolesMask;
+use Chevere\Container\Container;
 use Chevere\Http\Exceptions\ControllerException;
 use Chevere\Http\Exceptions\MethodNotAllowedException;
 use Chevere\Parameter\Interfaces\TypeInterface;
 use Chevere\Parameter\Type;
-use Chevere\Router\Container;
 use Chevere\Router\Exceptions\NotFoundException;
 use Chevere\Writer\NullWriter;
+use Chevereto\Authorization\Authorization;
 use Chevereto\Config\Config;
 use Chevereto\Legacy\Classes\Cache;
 use Chevereto\Legacy\Classes\Categories;
@@ -29,6 +31,7 @@ use Chevereto\Legacy\Classes\Palettes;
 use Chevereto\Legacy\Classes\RequestLog;
 use Chevereto\Legacy\Classes\Settings;
 use Chevereto\Legacy\Classes\Tags;
+use Chevereto\Legacy\Classes\TwoFactor;
 use Chevereto\Legacy\Classes\User;
 use Chevereto\Legacy\G\Handler;
 use Laminas\HttpHandlerRunner\Emitter\SapiEmitter;
@@ -72,6 +75,8 @@ $isService = env()['CHEVERETO_ENABLE_TENANTS'] === '1'
 $tenantsApiRouting = [
     '/_/',
 ];
+$rolesMask = new RolesMask(Authorization::roles());
+new Login($rolesMask);
 $isTenantsApiRouting = false;
 if ($isService) {
     foreach ($tenantsApiRouting as $route) {
@@ -156,7 +161,7 @@ if ($isTenantsApiRouting) {
         ], JSON_PRETTY_PRINT);
         exit();
     }
-    if ($routed->hasThrowable()
+    if ($routed->throwable() !== null
         && ! ($routed->throwable() instanceof ControllerException)
     ) {
         throw $routed->throwable();
@@ -171,7 +176,7 @@ if ($isTenantsApiRouting) {
     }
     $context = [];
     $view = $routed->bind()->view();
-    if ($routed->hasThrowable()) {
+    if ($routed->throwable() !== null) {
         $throwable = $routed->throwable();
         $errorMessage = $throwable->getMessage();
         $errorMessage = $errorMessage === '' ? null : $errorMessage;
@@ -332,6 +337,12 @@ $hook_before = function (Handler $handler) {
         $user_lang = Login::getUser()['language'];
         if (Login::getUser()['status'] === 'banned') {
             set_status_header(403);
+        }
+        if (sessionVar()->has('challenge_two_factor')
+            && ! TwoFactor::hasFor(Login::getUser()['id'])
+        ) {
+            sessionVar()->remove('challenge_two_factor');
+            sessionVar()->remove('challenge_two_factor_cookie');
         }
         if (sessionVar()->has('challenge_two_factor')
             && ! in_array($handler->getRoutePath(), ['account/two-factor', 'captcha-verify', 'logout'], true)
@@ -639,7 +650,9 @@ $hook_before = function (Handler $handler) {
             }
         }
     } else {
-        if ($base !== 'index' and ! is_route_available($handler->requestArray()[0])) {
+        if ($base !== 'index'
+            && ! is_route_available($handler->requestArray()[0])
+        ) {
             $mapTo = getSetting('root_route');
             $handler->mapRoute($mapTo);
         }

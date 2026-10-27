@@ -531,7 +531,7 @@ return function (Handler $handler) {
         $title = _s('Search results for %s', '<em><b>' . $user['search']['d'] . '</b></em>');
         $pre_doctitle .= $user['search']['d'] . ' - ';
     }
-    $pre_doctitle .= sprintf($user_views[$current_view]['title'], $user['name_html']);
+    $pre_doctitle .= sprintf($user_views[$current_view]['title'], $user['name']);
     if (getSetting('website_mode') === 'community' || $user['id'] !== getSetting('website_mode_personal_uid')) {
         $pre_doctitle .= ' (' . $user['username'] . ')';
     }
@@ -548,7 +548,7 @@ return function (Handler $handler) {
     if ($user_views['albums']['current']) {
         $meta_description = _s('%n (%u) albums on %w');
     } elseif ($user['bio'] ?? false) {
-        $meta_description = $safe_html_user['bio'];
+        $meta_description = $user['bio'];
     } else {
         $meta_description = _s('%n (%u) on %w');
     }

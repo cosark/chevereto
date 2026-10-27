@@ -19,18 +19,21 @@ if (!defined('ACCESS') || !ACCESS) {
 $tags = require_theme_file_return('snippets/tags_filter');
 $sub_tabs = Handler::var('sub_tabs');
 $tabs = Handler::var('tabs');
+$can_edit_background = Handler::cond('owner')
+    || Handler::cond('admin')
+    || (Handler::cond('content_manager') && ! Handler::var('user')['is_content_manager']);
 ?>
 <?php require_theme_header(); ?>
-<?php if (isset(Handler::var('user')["background"]) || Handler::cond('owner') || Handler::cond('content_manager')) { ?>
+<?php if (isset(Handler::var('user')["background"]) || $can_edit_background) { ?>
 <div id="background-cover" data-content="user-background-cover"<?php if (!isset(Handler::var('user')["background"])) {
             ?> class="no-background"<?php
         } ?>>
 	<div id="background-cover-wrap">
-		<div id="background-cover-src" data-content="user-background-cover-src"<?php if (isset(Handler::var('user')["background"], Handler::var('user')["background"]["url"])) {
-            ?> style="background-image: url('<?php echo Handler::var('user')["background"]["url"]; ?>');"<?php
+		<div id="background-cover-src" data-content="user-background-cover-src"<?php if (isset(Handler::var('user')["background"], Handler::var('user')["background"]['url'])) {
+            ?> style="background-image: url('<?php echo Handler::var('user')["background"]['url']; ?>');"<?php
         } ?>></div>
 <?php
-if (Handler::cond('owner') || Handler::cond('content_manager')) {
+if ($can_edit_background) {
 ?>
         <div title="<?php _se('Change background'); ?>" class="content-width">
             <div data-content="user-upload-background" class="btn btn-input default<?php if (isset(Handler::var('user')["background"])) {
@@ -64,11 +67,11 @@ if (Handler::cond('owner') || Handler::cond('content_manager')) {
 	<?php show_banner('user_after_top', Handler::var('listing')->sfw()); ?>
 	<div id="top-user" class="top-user<?php echo !isset(Handler::var('user')["background"]) ? ' no-background' : ''; ?>">
 		<div class="top-user-credentials">
-			<a class="top-user-avatar" href="<?php echo Handler::var('user')["url"]; ?>">
+			<a class="top-user-avatar" href="<?php echo Handler::var('user')['url']; ?>">
 				<?php
-                    if (isset(Handler::var('user')["avatar"])) {
+                    if (isset(Handler::var('user')['avatar'])) {
                         ?>
-				<img class="user-image" src="<?php echo Handler::var('user')["avatar"]["url"]; ?>" alt="">
+				<img class="user-image" src="<?php echo Handler::var('user')['avatar']['url']; ?>" alt="">
 				<?php
                     } else {
                         ?>
@@ -77,14 +80,14 @@ if (Handler::cond('owner') || Handler::cond('content_manager')) {
                     }
                 ?>
 			</a>
-            <h1><a href="<?php echo Handler::var('user')["url"]; ?>"><?php echo Handler::var('safe_html_user')[Handler::var('user')["name"] ? "name" : "username"]; ?></a></h1>
+            <h1><a href="<?php echo Handler::var('user')['url']; ?>"><?php echo Handler::var('safe_html_user')[Handler::var('user')['name'] ? 'name' : 'username']; ?></a></h1>
             <div class="user-social-networks">
-            <?php if (isset(Handler::var('user')["twitter"])) {
-                    ?><a class="fab fa-x-twitter" title="X" rel="tooltip" data-tipTip="top" href="<?php echo Handler::var('user')["twitter"]["url"]; ?>" rel="nofollow" target="_blank"></a><?php
-                } if (isset(Handler::var('user')["facebook"])) {
-                    ?><a class="icon fab fa-facebook" href="<?php echo Handler::var('user')["facebook"]["url"]; ?>" rel="nofollow" target="_blank"></a><?php
-                } if (isset(Handler::var('user')["website"])) {
-                    ?><a title="<?php _se('Website'); ?>" rel="tooltip" data-tipTip="top" href="<?php echo Handler::var('user')['website_display']; ?>"<?php echo !Handler::var('user')['is_admin'] ? ' rel="nofollow"' : null; ?> target="_blank"><span class="fas fa-globe-americas margin-right-5"></span>Website</a><?php
+            <?php if (isset(Handler::var('safe_html_user')['twitter'])) {
+                    ?><a class="fab fa-x-twitter" title="X" rel="tooltip" data-tipTip="top" href="<?php echo Handler::var('safe_html_user')['twitter']['url']; ?>" rel="nofollow" target="_blank"></a><?php
+                } if (isset(Handler::var('safe_html_user')['facebook'])) {
+                    ?><a class="icon fab fa-facebook" href="<?php echo Handler::var('safe_html_user')['facebook']['url']; ?>" rel="nofollow" target="_blank"></a><?php
+                } if (isset(Handler::var('user')['website'])) {
+                    ?><a title="<?php _se('Website'); ?>" rel="tooltip" data-tipTip="top" href="<?php echo Handler::var('safe_html_user')['website_display']; ?>"<?php echo !Handler::var('user')['is_admin'] ? ' rel="nofollow"' : null; ?> target="_blank"><span class="fas fa-globe-americas margin-right-5"></span>Website</a><?php
                 } ?>
             </div>
             <?php if (Handler::var('user')['is_private'] == 1) { ?>
@@ -113,13 +116,13 @@ if (Handler::cond('owner') || Handler::cond('content_manager')) {
 				<a class="number-figures" href="<?php echo Handler::var('user')["url_albums"]; ?>"><i class="icon far fa-images"></i> <b data-text="album-count"><?php echo Handler::var('user')["album_count"]; ?></b> <span data-text="album-label" data-label-single="<?php _ne('album', 'albums', 1); ?>" data-label-plural="<?php _ne('album', 'albums', 2); ?>"><?php _ne('album', 'albums', Handler::var('user')['album_count']); ?></span></a>
 				<?php if (getSetting('enable_likes') && Handler::var('user')['is_private'] == 0) {
                 ?>
-				<a class="number-figures" href="<?php echo Handler::var('user')["url"]; ?>/liked"><span class="icon far fa-heart"></span> <b data-text="likes-count"><?php echo Handler::var('user')["liked"]; ?></b></a>
+				<a class="number-figures" href="<?php echo Handler::var('user')['url']; ?>/liked"><span class="icon far fa-heart"></span> <b data-text="likes-count"><?php echo Handler::var('user')["liked"]; ?></b></a>
 				<?php
             } ?>
 			</div>
             <?php if (Handler::cond('search_enabled')) { ?>
 			<div class="input-search col-7 col-7-max">
-				<form action="<?php echo rtrim(Handler::var('user')["url"], '/') . "/search/"; ?>">
+				<form action="<?php echo rtrim(Handler::var('user')['url'], '/') . "/search/"; ?>">
                     <input required class="search two-icon-padding" type="text" placeholder="<?php echo Handler::var('safe_html_user')["name"]; ?>" autocomplete="off" spellcheck="false" name="q" value="<?php echo safe_html(Handler::var('user')['search']['q'] ?? ''); ?>">
 				</form>
 				<span class="icon fas fa-search icon--search"></span><span class="icon icon--close fas fa-times hidden" data-action="clear-search"></span>
@@ -164,7 +167,7 @@ if (Handler::cond('owner') || Handler::cond('content_manager')) {
 		</div>
 	</div>
 	<?php
-        if (isset(Handler::var('user')["background"]) || Handler::cond('owner') || Handler::cond('content_manager')) {
+        if (isset(Handler::var('user')["background"]) || $can_edit_background) {
             show_theme_inline_code('snippets/user.js');
         }
     ?>
@@ -186,10 +189,10 @@ require_theme_file('snippets/tabs');
 <div class="top-sub-bar follow-scroll margin-bottom-5">
     <div class="content-width">
         <div class="header header-tabs">
-            <a href="<?php echo Handler::var('user')["url"]; ?>" class="user-image margin-right-5 float-left">
-                <?php if (isset(Handler::var('user')["avatar"])) {
+            <a href="<?php echo Handler::var('user')['url']; ?>" class="user-image margin-right-5 float-left">
+                <?php if (isset(Handler::var('user')['avatar'])) {
         ?>
-                <img src="<?php echo Handler::var('user')["avatar"]["url"]; ?>" alt="">
+                <img src="<?php echo Handler::var('user')['avatar']['url']; ?>" alt="">
                 <?php
     } else {
         ?>

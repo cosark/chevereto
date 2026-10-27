@@ -11,6 +11,10 @@
 
 namespace Chevereto\Legacy\Classes;
 
+use Chevereto\Http\RequestUser;
+use Chevereto\Permissions\SettingsOverridePermission;
+use Chevereto\Permissions\UserPermission;
+use Chevereto\Url\UrlValidate;
 use DateTimeZone;
 use Exception;
 use FFMpeg\Coordinate\TimeCode;
@@ -19,6 +23,7 @@ use FFMpeg\Media\Video;
 use Intervention\Image\ImageManagerStatic;
 use LogicException;
 use PHPExif\Exif;
+use Redis;
 use Throwable;
 use function Chevere\Message\message;
 use function Chevere\Standard\randomString;
@@ -205,6 +210,8 @@ class Image
         ],
     ];
 
+    public const VIDEOS = ['mov', 'quicktime', 'mp4', 'webm'];
+
     public static array $table_chv_image = [
         'name',
         'extension',
@@ -281,11 +288,12 @@ class Image
         ['year', 1, 31536000],
     ];
 
-    public static function getSingle(
+    public static function getById(
         int $id,
         bool $sumView = false,
         bool $pretty = false,
-        array $requester = []
+        array $requester = [],
+        bool $includeAlbumSlice = false,
     ): array {
         $tables = DB::getTables();
         $joins = [
@@ -383,29 +391,34 @@ class Image
         if (version_compare(cheveretoVersionInstalled(), '4.2.0', '>=')) {
             $tagsFilesTable = $tables['tags_files'];
             $tagsTable = $tables['tags'];
-            $tagsSql = <<<MySQL
+            $tagsSql = <<<SQL
             SELECT `tag_id` id, `tag_name` name, `tag_user_id` user_id
             FROM `{$tagsFilesTable}` tf
             JOIN `{$tagsTable}` t
                 ON tf.tag_file_tag_id = t.tag_id
                 AND tf.tag_file_file_id = :image_id;
 
-            MySQL;
+            SQL;
             $db = DB::getInstance();
             $db->query($tagsSql);
             $db->bind(':image_id', $id);
             $image_tags = $db->fetchAll() ?: [];
             foreach ($image_tags as $k => $v) {
-                $image_tags[$k] = Tag::row($v['name']);
+                $image_tags[$k] = array_merge($v, Tag::row($v['name']));
             }
             $image_tags_string = implode(', ', array_column($image_tags, 'name'));
         }
         $image_db['image_tags'] = $image_tags;
         $image_db['image_tags_string'] = $image_tags_string;
         $return = $image_db;
-        $return = $pretty ? self::formatArray($return, fillAlbumCover: false) : $return;
+        $return = $pretty
+            ? self::formatArray($return, fillAlbumCover: false)
+            : $return;
         if (! isset($return['file_resource'])) {
             $return['file_resource'] = self::getSrcTargetSingle($image_db);
+        }
+        if ($includeAlbumSlice && isset($return['album']['id'])) {
+            $return['album']['slice'] = self::getAlbumSlice($return['id'], $return['album']['id'], 2, $requester);
         }
 
         return $return;
@@ -455,9 +468,11 @@ class Image
     public static function getAlbumSlice(
         int $image_id,
         ?int $album_id = null,
-        int $padding = 2
+        int $padding = 2,
+        array $requester = [],
     ): array {
         $tables = DB::getTables();
+        $requester = $requester ?: Login::getUser();
         if (! isset($album_id)) {
             $db = DB::getInstance();
             $db->query('SELECT image_album_id FROM ' . $tables['images'] . ' WHERE image_id=:image_id');
@@ -476,16 +491,24 @@ class Image
         $prevListing->setLimit(($padding * 2) + 1);
         $prevListing->setSortType('date');
         $prevListing->setSortOrder('desc');
-        $prevListing->setRequester(Login::getUser());
-        $prevListing->setWhere('WHERE image_album_id=' . $album_id . ' AND image_id <= ' . $image_id);
+        $prevListing->setRequester($requester);
+        $prevListing->setWhere(
+            <<<SQL
+            WHERE image_album_id={$album_id} AND image_id <= {$image_id}
+            SQL
+        );
         $prevListing->exec();
         $nextListing = new Listing();
         $nextListing->setType('images');
         $nextListing->setLimit($padding * 2);
         $nextListing->setSortType('date');
         $nextListing->setSortOrder('asc');
-        $nextListing->setRequester(Login::getUser());
-        $nextListing->setWhere('WHERE image_album_id=' . $album_id . ' AND image_id > ' . $image_id);
+        $nextListing->setRequester($requester);
+        $nextListing->setWhere(
+            <<<SQL
+            WHERE image_album_id={$album_id} AND image_id > {$image_id}
+            SQL
+        );
         $nextListing->exec();
         if (is_array($prevListing->output)) {
             $prevListing->output = array_reverse($prevListing->output);
@@ -519,15 +542,15 @@ class Image
         $images = [];
         foreach ($list as $v) {
             $format = self::formatArray($v, fillAlbumCover: false);
-            $images[$format['id']] = $format;
+            $images[$format['id_encoded']] = $format;
         }
         if ($prevListing->output !== [] && $prevListing->count > 1) {
             $prevLastKey = $prevListing->count - 2;
-            $prevLastId = $prevListing->output[$prevLastKey]['image_id'];
+            $prevLastId = encodeID((int) $prevListing->output[$prevLastKey]['image_id']);
             $slice['prev'] = $images[$prevLastId];
         }
         if ($nextListing->output) {
-            $slice['next'] = $images[$nextListing->output[0]['image_id']];
+            $slice['next'] = $images[encodeID((int) $nextListing->output[0]['image_id'])];
         }
         $slice['images'] = $images;
 
@@ -597,7 +620,7 @@ class Image
         foreach (array_keys($targets['chain']) as $k) {
             $extension = $fileArray[$prefix . 'extension'];
             if ($k !== 'image'
-                && in_array($extension, ['mov', 'mp4', 'webm'], true)
+                && in_array($extension, self::VIDEOS, true)
             ) {
                 $extension = 'jpeg';
             }
@@ -634,17 +657,20 @@ class Image
 
     public static function getAvailableExpirations(): array
     {
+        static $cache;
+
+        if (isset($cache)) {
+            return $cache;
+        }
         $string = _s('After %n %t');
-        $translate = [
-            'minute' => _n('minute', 'minutes', 1),
-            'hour' => _n('hour', 'hours', 1),
-            'day' => _n('day', 'days', 1),
-            'week' => _n('week', 'weeks', 1),
-            'month' => _n('month', 'months', 1),
-            'year' => _n('year', 'years', 1),
-        ];
+        _n('minute', 'minutes', 1);
+        _n('hour', 'hours', 1);
+        _n('day', 'days', 1);
+        _n('week', 'weeks', 1);
+        _n('month', 'months', 1);
+        _n('year', 'years', 1);
         $return = [
-            null => _s("Don't auto delete"),
+            '' => _s("Don't auto delete"),
         ];
         $table = self::$expirations;
         foreach ($table as $expire) {
@@ -656,7 +682,7 @@ class Image
             ]);
         }
 
-        return $return;
+        return $cache = $return;
     }
 
     public static function watermarkTempFile(): string
@@ -666,7 +692,7 @@ class Image
             . '/chv'
             . env()['CHEVERETO_TENANT']
             . '_image_'
-            . getSetting('watermark_image');
+            . basename((string) getSetting('watermark_image'));
     }
 
     public static function watermarkFromDb(): string
@@ -779,13 +805,12 @@ class Image
         array $options = [],
         int|null $storage_id = null,
         bool $guestSessionHandle = true,
-        string $checksum = null
+        ?string $checksum = null,
+        bool $isFiles = true,
     ): array {
         if ((! (bool) env()['CHEVERETO_ENABLE_LOCAL_STORAGE'])) {
             if ($storage_id === null) {
                 throw new LogicException('Local storage API is forbidden', 900);
-            }
-            if ($storage_id === 0) {
             }
         }
         $default_options = Upload::getDefaultOptions();
@@ -794,6 +819,7 @@ class Image
             $options['filenaming'] = 'original';
         }
         $upload = new Upload();
+        $upload->setIsFiles($isFiles);
         $upload->setSource($source);
         $upload->setDestination($destination);
         $upload->setOptions($options);
@@ -823,12 +849,12 @@ class Image
         $db = DB::getInstance();
         $tableUploads = DB::getTable('uploads');
         $db->query(
-            <<<MySQL
+            <<<SQL
             SELECT 1 FROM `{$tableUploads}`
             WHERE upload_checksum=:checksum
                 AND upload_uploader_ip=:ip
                 AND upload_date_gmt > :date_gmt;
-            MySQL
+            SQL
         );
         $db->bind(':checksum', $checksum);
         $db->bind(':ip', get_client_ip());
@@ -860,12 +886,12 @@ class Image
         $db = DB::getInstance();
         $tableImages = DB::getTable('images');
         $db->query(
-            <<<MySQL
+            <<<SQL
             SELECT 1 FROM `{$tableImages}`
             WHERE (image_checksum=:checksum OR image_source_checksum=:checksum)
                 AND image_uploader_ip=:ip
                 AND image_date_gmt > :date_gmt;
-            MySQL
+            SQL
         );
         $db->bind(':checksum', $checksum);
         $db->bind(':ip', get_client_ip());
@@ -875,15 +901,26 @@ class Image
         return (bool) $db->fetchColumn();
     }
 
-    public static function validateParamsUploadToWebsite(array &$params = [], array $user = []): void
+    public static function validateParamsUploadToWebsite(array &$params = [], array $user = [], bool $guestSessionHandle = true): void
     {
         // Validate user_id existence
         // Validate category_id existence
-        // Validate album_id ownership
         // params:
         // {"type":"chunked","privacy":"","timestamp":"1744383904543","expiration":"","category_id":"","nsfw":"0","album_id":"","tags":"","mimetype":"image\/jpeg","source":"Sony HV-30 DSC00271.JPG","size":"23122540"}
         $params['use_file_date'] = $params['use_file_date'] ?? false;
         nullify_string($params['album_id']);
+        if (! isset($params['album_id'])) {
+            return;
+        }
+        if ($user === [] && $guestSessionHandle) {
+            $params['album_id'] = null;
+
+            return;
+        }
+        $album = Album::getById((int) $params['album_id']);
+        if ($album === [] || ($album['user']['id'] ?? null) !== ($user['id'] ?? null)) {
+            $params['album_id'] = null;
+        }
     }
 
     /**
@@ -892,6 +929,7 @@ class Image
      * Handles the entire image upload process including storage selection,
      * file validation, image processing, watermarking, and database insertion.
      *
+     * @param string $type The type of upload: 'chunked', 'file', or 'url'
      * @param array|string $source Either an array with file data or a URL string to fetch
      * @param array $user User array data, empty for guest uploads
      * @param array $params Upload parameters that may include:
@@ -911,18 +949,34 @@ class Image
      *        - timestamp: Upload timestamp
      * @param bool $guestSessionHandle Whether to handle guest session tracking
      * @param string|null $ip Override for uploader IP address
+     * @param bool $isFiles Whether the source is expected to be a file upload (default true)
      * @return array Array containing [inserted_id, delete_password]
      * @throws Exception For various error conditions including duplicates, storage issues, moderation rejection
      */
     public static function uploadToWebsite(
+        string $type,
         array|string $source,
         array $user = [],
         array $params = [],
         bool $guestSessionHandle = true,
-        string|null $ip = null
+        string|null $ip = null,
+        bool $isFiles = true
     ): array {
-        self::validateParamsUploadToWebsite($params);
+        self::validateParamsUploadToWebsite($params, $user, $guestSessionHandle);
         $dateFolder = '';
+        if (! in_array($type, ['chunked', 'file', 'url'], true)) {
+            throw new Exception('Invalid upload type', 400);
+        }
+        if ($type !== 'file' && ! is_string($source)) {
+            throw new Exception('Invalid source for upload', 400);
+        }
+        if ($type === 'file'
+            && $isFiles
+            && (! is_array($source)
+            || ! is_uploaded_file($source['tmp_name']))
+        ) {
+            throw new Exception('Invalid source for file upload', 400);
+        }
 
         try {
             $storage_mode = getSetting('upload_storage_mode');
@@ -956,7 +1010,10 @@ class Image
                     break;
             }
             if (is_string($source)) {
-                if (preg_match('/^CHUNKED_([^_]+)_([a-zA-Z0-9]{64})_([a-zA-Z0-9]{64})$/', $source, $matches)) {
+                if ($type === 'chunked') {
+                    if (! preg_match('/^CHUNKED_([^_]+)_([a-zA-Z0-9]{64})_([a-zA-Z0-9]{64})$/', $source, $matches)) {
+                        throw new Exception('Invalid source for chunked upload', 400);
+                    }
                     [$tempName, $uploadParams] = Uploads::join(
                         uploadPath: $uploadPath,
                         uploadId: decodeID($matches[1]),
@@ -972,7 +1029,11 @@ class Image
                         );
                     }
                     $tempName = Upload::getTempNam($uploadPath);
-                    fetch_url($source, $tempName);
+                    fetch_url(
+                        $source,
+                        $tempName,
+                        (new UrlValidate($source))->getCurlOptions()
+                    );
                 }
                 $mimetype = get_mimetype($tempName);
                 $source = [
@@ -1095,7 +1156,8 @@ class Image
                     : null,
                 $upload_options,
                 $storage_id,
-                $guestSessionHandle
+                $guestSessionHandle,
+                isFiles: false,
             ); // slow: 6s
             $chain_mask = [0, 0, 1, 0, 1]; // frame, original, image, medium, thumb
             // if ($do_dupe_check && self::isDuplicatedUpload($image_upload['uploaded']['fileinfo']['checksum'])) {
@@ -1427,12 +1489,9 @@ class Image
                 $image_insert_values['id'] = $target_id;
             }
             $image_insert_values['title'] = mb_substr($image_insert_values['title'] ?? '', 0, 100, 'UTF-8');
-            // Validate user_id album ownership
-            if ($user !== [] && isset($image_insert_values['album_id'])) {
-                $album = Album::getSingle((int) $image_insert_values['album_id']);
-                if (($album['user']['id'] ?? 0) !== $user['id']) {
-                    unset($image_insert_values['album_id'], $album);
-                }
+            // album_id ownership already validated by validateParamsUploadToWebsite()
+            if (isset($image_insert_values['album_id'])) {
+                $album = Album::getById((int) $image_insert_values['album_id']);
             }
             if (isset($ip)) {
                 $image_insert_values['uploader_ip'] = $ip;
@@ -1450,7 +1509,7 @@ class Image
                 $upload_timestamp = $params['timestamp'] ?? time();
                 $session_handle = 'upload_' . $upload_timestamp;
                 $album = isset(session()[$session_handle])
-                    ? Album::getSingle(decodeID(session()[$session_handle]))
+                    ? Album::getById(decodeID(session()[$session_handle]))
                     : null;
                 // @phpstan-ignore-next-line
                 if (! empty($album)
@@ -1469,7 +1528,11 @@ class Image
             }
 
             if (isset($image_insert_values['album_id'])) {
-                Album::addImage($image_insert_values['album_id'], $uploaded_id);
+                Album::addImages(
+                    $image_insert_values['album_id'],
+                    $user['id'] ?? null,
+                    $uploaded_id
+                );
             }
             if ($user !== []) {
                 DB::increment('users', [
@@ -1478,9 +1541,7 @@ class Image
                     'id' => $user['id'],
                 ]);
             } elseif ($guestSessionHandle === true) {
-                $addValue = session()['guest_images'] ?? [];
-                $addValue[] = $uploaded_id;
-                sessionVar()->put('guest_images', $addValue);
+                self::addGuestImage((int) $uploaded_id);
             }
 
             return [$uploaded_id, $deletePassword];
@@ -1499,9 +1560,44 @@ class Image
         }
     }
 
+    /**
+     * Uses an atomic Redis set when available
+     * as concurrent requests overwrite each other's session writes.
+     */
+    public static function addGuestImage(int $id): void
+    {
+        $store = self::getGuestImagesRedis();
+        if ($store !== null) {
+            [$redis, $key] = $store;
+            $redis->sAdd($key, $id);
+            $redis->expire($key, 86400);
+
+            return;
+        }
+        $addValue = session()['guest_images'] ?? [];
+        $addValue[] = $id;
+        sessionVar()->put('guest_images', $addValue);
+    }
+
+    /**
+     * @return int[] The subset of $ids uploaded by the current guest
+     */
+    public static function filterGuestImages(int ...$ids): array
+    {
+        $store = self::getGuestImagesRedis();
+        $guestImages = $store !== null
+            ? $store[0]->sMembers($store[1])
+            : (session()['guest_images'] ?? []);
+
+        return array_values(array_intersect($ids, $guestImages));
+    }
+
     public static function getEnabledImageExtensions(): array
     {
-        $formats = explode(',', Settings::get('upload_enabled_image_formats'));
+        $formats = Settings::get('upload_enabled_image_formats');
+        if (is_string($formats)) {
+            $formats = explode(',', $formats);
+        }
         if (in_array('jpg', $formats, true)
             && ! in_array('jpeg', $formats, true)
         ) {
@@ -1520,9 +1616,8 @@ class Image
     {
         $extensions = self::getEnabledImageExtensions();
         $accept = [];
-        $videos = ['mov', 'mp4', 'webm'];
         foreach ($extensions as $extension) {
-            $type = in_array($extension, $videos, true)
+            $type = in_array($extension, self::VIDEOS, true)
                 ? 'video'
                 : 'image';
             if ($extension === 'mov') {
@@ -1560,144 +1655,131 @@ class Image
         return $resize->resized();
     }
 
-    public static function update(int $id, array $values): int
+    public static function update(int $id, array $values, ?RequestUser $requestUser = null): int
     {
-        $image_db = self::getSingle($id);
-        $user_id = $image_db['image_user_id'] ?? null;
-        if ($user_id) {
-            $tags = (string) ($values['tags'] ?? '');
-            $tags = Tag::parse($tags);
+        $errors = [];
+        $image = self::getById($id, pretty: true);
+        $old_album_id = $image['album_id'] ?? null;
+        $user_id = $image['user']['id'] ?? null;
+        $category_id = $values['category_id'] ?? null;
+        $tags = null;
+        $tagsString = isset($values['tags'])
+            ? (string) $values['tags']
+            : null;
+        if ($user_id !== ($requestUser?->id ?? 0)
+            && ! ($requestUser?->hasPermission(UserPermission::EditContent) ?? false)
+        ) {
+            throw new Exception(code: 403);
+        }
+        if ($category_id && ! isset(Categories::get()[$category_id])) {
+            $errors['/category_id'] = 'Category does not exist';
+        }
+        if (
+            isset($values['nsfw'])
+            && (int) $values['nsfw'] !== (int) ($image['nsfw'] ?? 0)
+            && getSetting('image_lock_nsfw_editing')
+            && ! ($requestUser?->hasPermission(SettingsOverridePermission::FileLockNSFWEditing) ?? false)
+        ) {
+            $errors['/nsfw'] = 'NSFW editing is locked';
+        }
+        foreach (['title', 'description'] as $k) {
+            try {
+                assertNotStopWords($values[$k] ?? '');
+            } catch (Throwable $e) {
+                $errors["/{$k}"] = $e->getMessage();
+            }
+        }
+        if ($user_id && $tagsString !== null) {
+            try {
+                $tags = Tag::parse($tagsString);
+            } catch (Throwable $e) {
+                $errors['/tags'] = $e->getMessage();
+            }
         }
         unset($values['tags']);
         $values = array_filter_array($values, self::$table_chv_image, 'exclusion');
-        assertNotStopWords($values['title'] ?? '', $values['description'] ?? '');
         foreach (['title', 'description', 'category_id', 'album_id'] as $v) {
             if (! array_key_exists($v, $values)) {
                 continue;
             }
             nullify_string($values[$v]);
         }
-        $return = DB::update('images', $values, [
-            'id' => $id,
-        ]);
-        if (isset($values['album_id'])) {
-            $old_album = $image_db['image_album_id'];
-            if ($return && $old_album !== $values['album_id']) {
-                if ($old_album != null) { // Update the old album
-                    Album::updateImageCount((int) $old_album, 1, '-');
-                    DB::update(
-                        'albums',
-                        [
-                            'cover_id' => null,
-                        ],
-                        [
-                            'id' => $old_album,
-                            'cover_id' => $id,
-                        ]
-                    );
+        if ($values['album_id'] ?? null) {
+            $values['album_id'] = match (true) {
+                is_string($values['album_id']) => decodeID($values['album_id']),
+                default => $values['album_id'],
+            };
+            $album = Album::getById($values['album_id']);
+            if ($album === []) {
+                $errors['/album_id'] = 'Album does not exist';
+            } elseif (($album['user']['id'] ?? null) === null) {
+                $errors['/album_id'] = 'Album does not belong to any user';
+            } elseif ($album['user']['id'] !== $user_id) {
+                $errors['/album_id'] = 'Album does not belong to the image user';
+            }
+        }
+        if (getSetting('akismet')
+            && ! ($requestUser?->hasPermission(SettingsOverridePermission::Akismet) ?? false)
+        ) {
+            Akismet::checkImage(
+                title: $values['title'] ?? null,
+                description: $values['description'] ?? null,
+                tags: $tagsString,
+                source_db: $image
+            );
+        }
+        if ($errors !== []) {
+            throw new Exception(implode('; ', $errors), 422);
+        }
+        $return = 0;
+        if ($values !== []) {
+            $return = DB::update(
+                'images',
+                $values,
+                [
+                    'id' => $id,
+                ]
+            ) ?: 0;
+        }
+        if ($return) {
+            if (isset($values['album_id'])) {
+                if ($old_album_id !== $values['album_id']) {
+                    $albumIds = [$values['album_id']];
+                    if ($old_album_id != null) {
+                        Album::updateImageCount($old_album_id, 1, '-');
+                        DB::update(
+                            'albums',
+                            [
+                                'cover_id' => null,
+                            ],
+                            [
+                                'id' => $old_album_id,
+                                'cover_id' => $id,
+                            ]
+                        );
+                        $albumIds[] = $old_album_id;
+                    }
+                    Album::updateImageCount($values['album_id'], 1);
+                    Album::populateCover($values['album_id']);
+                    Listing::deleteTypeIdCache('a', ...$albumIds);
                 }
-                Album::updateImageCount((int) $values['album_id'], 1);
-                Album::populateCover((int) $values['album_id']);
+            } elseif (array_key_exists('album_id', $values) && $old_album_id) {
+                Album::updateImageCount($old_album_id, 1, '-');
+                Listing::deleteTypeIdCache('a', $old_album_id);
             }
+            Listing::deleteTypeIdCache('i', $id);
         }
-        if ($user_id) {
-            static::tag($id, ...$tags);
+        $tagsCount = 0;
+        if ($user_id && isset($tags)) {
+            $tagsCount = static::tag($id, ...$tags);
         }
 
-        return $return;
-    }
-
-    public static function tag(int $id, string ...$tag): void
-    {
-        $tag = array_filter($tag);
-        $tag = array_unique($tag);
-        $imagesTable = DB::getTable('images');
-        $tagsFilesTable = DB::getTable('tags_files');
-        $tagsUsersTable = DB::getTable('tags_users');
-        $tagsAlbumsTable = DB::getTable('tags_albums');
-        $tagsTable = DB::getTable('tags');
-        $userIdSQL = <<<MySQL
-        SELECT `image_user_id` user_id
-        FROM {$imagesTable}
-        WHERE image_id = {$id};
-
-        MySQL;
-        $user_id = DB::queryFetchSingle($userIdSQL)['user_id']
-            ?? throw new LogicException('Tag requires user_id', 600);
-        Tag::insert($user_id, ...$tag);
-        $binds = [
-            ':file_id' => $id,
-            ':user_id' => $user_id,
-        ];
-        $sql = <<<MySQL
-        SET @TAGS_IDS = (SELECT GROUP_CONCAT(`tag_file_tag_id`)
-                FROM `{$tagsFilesTable}`
-                WHERE `tag_file_file_id` = :file_id);
-        SET @ALBUM_ID = (SELECT `image_album_id`
-                FROM `{$imagesTable}`
-                WHERE `image_id` = :file_id);
-
-        UPDATE `{$tagsUsersTable}` SET `tag_user_count` = `tag_user_count` - 1
-        WHERE `tag_user_user_id` = :user_id
-        AND FIND_IN_SET(`tag_user_tag_id`, @TAGS_IDS);
-
-        UPDATE `{$tagsAlbumsTable}`
-        SET `tag_album_count` = `tag_album_count` - 1
-        WHERE `tag_album_album_id` = @ALBUM_ID
-        AND `tag_album_user_id` = :user_id
-        AND FIND_IN_SET(`tag_album_tag_id`, @TAGS_IDS)
-        AND @ALBUM_ID IS NOT NULL;
-
-        UPDATE `{$tagsTable}` SET `tag_files` = `tag_files` - 1
-        WHERE FIND_IN_SET(`tag_id`, @TAGS_IDS);
-
-        DELETE FROM `{$tagsFilesTable}`
-        WHERE `tag_file_file_id` = :file_id;
-
-        MySQL;
-        if ($tag !== []) {
-            foreach ($tag as $pos => $name) {
-                try {
-                    Tag::assert($name);
-                } catch (Exception) {
-                    continue;
-                }
-            }
-            $template = <<<MySQL
-            SET @TAG_ID = (SELECT `tag_id` FROM `{$tagsTable}` WHERE `tag_name` = :tag_name_%);
-
-            INSERT IGNORE INTO `{$tagsFilesTable}` (`tag_file_tag_id`, `tag_file_file_id`)
-            VALUES (@TAG_ID, :file_id);
-
-            INSERT INTO `{$tagsUsersTable}` (`tag_user_tag_id`, `tag_user_user_id`, `tag_user_count`)
-            VALUES (@TAG_ID, :user_id, 1)
-            ON DUPLICATE KEY UPDATE `tag_user_count` = `tag_user_count` + 1;
-
-            INSERT INTO `{$tagsAlbumsTable}` (`tag_album_tag_id`, `tag_album_album_id`, `tag_album_user_id`, `tag_album_count`)
-            SELECT @TAG_ID, @ALBUM_ID, :user_id, 1
-            WHERE @ALBUM_ID IS NOT NULL
-            ON DUPLICATE KEY UPDATE `tag_album_count` = `tag_album_count` + 1;
-
-            UPDATE `{$tagsTable}` SET `tag_files` = `tag_files` + 1
-            WHERE `tag_id` = @TAG_ID;
-
-            MySQL;
-            foreach ($tag as $pos => $name) {
-                $sql .= str_replace('%', $pos, $template);
-                $binds[':tag_name_' . $pos] = $name;
-            }
-        }
-        $db = DB::getInstance();
-        $db->query($sql);
-        foreach ($binds as $key => $value) {
-            $db->bind($key, $value);
-        }
-        $db->exec();
+        return $return ?: $tagsCount ?: 0;
     }
 
     public static function delete(int $id, bool $update_user = true): int
     {
-        $image = self::getSingle(id: $id, pretty: true);
+        $image = self::getById(id: $id, pretty: true);
         $disk_space_used = $image['size']
             + $image['thumb_size']
             + $image['medium_size']
@@ -1851,6 +1933,7 @@ class Image
     {
         $image['id_encoded'] = encodeID((int) $image['id']);
         $targets = self::getSrcTargetSingle($image, false);
+        $image['sizes'] = array_keys($targets['chain']);
         $medium_size = getSetting('upload_medium_size');
         $medium_fixed_dimension = getSetting('upload_medium_fixed_dimension');
         $image_fileinfo = [
@@ -1862,8 +1945,23 @@ class Image
         $image['file_resource'] = $targets;
         foreach ($targets['chain'] as $k => $v) {
             $image[$k] = get_fileinfo($v);
+            if ($k === 'thumb') {
+                $image['thumb'] = array_merge(
+                    $image['thumb'],
+                    [
+                        'width' => getSetting('upload_thumb_width'),
+                        'height' => getSetting('upload_thumb_height'),
+                    ]
+                );
+            }
             $image[$k]['size'] = $image[($k == 'image' ? '' : $k . '_') . 'size'];
+            $image[$k]['size_formatted'] = format_bytes($image[$k]['size']);
         }
+        $image['image'] = array_merge($image['image'], [
+            'width' => $image['width'],
+            'height' => $image['height'],
+            'ratio' => $image['ratio'],
+        ]);
         $image['url_frame'] = $image['frame']['url'] ?? '';
         $image['size_formatted'] = format_bytes($image['size']);
         $display_url = $image['frame']['url']
@@ -1977,7 +2075,8 @@ class Image
                 }
             }
             $output['album'] ??= [];
-            Album::fill($output['album'], $output['user'], $fillAlbumCover);
+            $user = $output['user'];
+            Album::fill($output['album'], $user); // do not "refill" user
         } else {
             unset($output['album']);
         }
@@ -1985,7 +2084,7 @@ class Image
         if ($safe) {
             unset(
                 $output['storage'], $output['id'], $output['path'], $output['uploader_ip'],
-                $output['album']['id'], $output['album']['privacy_extra'], $output['album']['user_id'],
+                $output['album']['id'], $output['album']['privacy_extra'], $output['album']['user_id'], $output['album']['creation_ip'],
                 $output['album']['password'], $output['album']['cover_id'], $output['album']['parent_id'],
                 $output['user']['id'], $output['user']['email'],
                 $output['file_resource'],
@@ -2018,6 +2117,96 @@ class Image
             ->save($frameFile);
 
         return $frameFile;
+    }
+
+    // TODO: When moving images from one album to another, we need to update the tags_albums table to reflect the new album_id for each tag associated with the image. This is not currently handled in the tag() method, which only updates counts and associations based on the current album_id of the image. We should consider adding logic to handle this case in the future.
+    public static function tag(int $id, string ...$tag): int
+    {
+        $tag = array_filter($tag);
+        $tag = array_unique($tag);
+        $imagesTable = DB::getTable('images');
+        $tagsFilesTable = DB::getTable('tags_files');
+        $tagsUsersTable = DB::getTable('tags_users');
+        $tagsAlbumsTable = DB::getTable('tags_albums');
+        $tagsTable = DB::getTable('tags');
+        $userIdSQL = <<<SQL
+        SELECT `image_user_id` user_id
+        FROM {$imagesTable}
+        WHERE image_id = {$id};
+
+        SQL;
+        $user_id = DB::queryFetchSingle($userIdSQL)['user_id']
+            ?? throw new LogicException('Tag requires user_id', 600);
+        Tag::insert($user_id, ...$tag);
+        $binds = [
+            ':file_id' => $id,
+            ':user_id' => $user_id,
+        ];
+        $sql = <<<SQL
+        SET @TAGS_IDS = (SELECT GROUP_CONCAT(`tag_file_tag_id`)
+                FROM `{$tagsFilesTable}`
+                WHERE `tag_file_file_id` = :file_id);
+        SET @ALBUM_ID = (SELECT `image_album_id`
+                FROM `{$imagesTable}`
+                WHERE `image_id` = :file_id);
+
+        UPDATE `{$tagsUsersTable}` SET `tag_user_count` = `tag_user_count` - 1
+        WHERE `tag_user_user_id` = :user_id
+        AND FIND_IN_SET(`tag_user_tag_id`, @TAGS_IDS);
+
+        UPDATE `{$tagsAlbumsTable}`
+        SET `tag_album_count` = `tag_album_count` - 1
+        WHERE `tag_album_album_id` = @ALBUM_ID
+        AND `tag_album_user_id` = :user_id
+        AND FIND_IN_SET(`tag_album_tag_id`, @TAGS_IDS)
+        AND @ALBUM_ID IS NOT NULL;
+
+        UPDATE `{$tagsTable}` SET `tag_files` = `tag_files` - 1
+        WHERE FIND_IN_SET(`tag_id`, @TAGS_IDS);
+
+        DELETE FROM `{$tagsFilesTable}`
+        WHERE `tag_file_file_id` = :file_id;
+
+        SQL;
+        if ($tag !== []) {
+            $template = <<<SQL
+            SET @TAG_ID = (SELECT `tag_id` FROM `{$tagsTable}` WHERE `tag_name` = :tag_name_%);
+
+            INSERT IGNORE INTO `{$tagsFilesTable}` (`tag_file_tag_id`, `tag_file_file_id`)
+            VALUES (@TAG_ID, :file_id);
+
+            INSERT INTO `{$tagsUsersTable}` (`tag_user_tag_id`, `tag_user_user_id`, `tag_user_count`)
+            VALUES (@TAG_ID, :user_id, 1)
+            ON DUPLICATE KEY UPDATE `tag_user_count` = `tag_user_count` + 1;
+
+            INSERT INTO `{$tagsAlbumsTable}` (`tag_album_tag_id`, `tag_album_album_id`, `tag_album_user_id`, `tag_album_count`)
+            SELECT @TAG_ID, @ALBUM_ID, :user_id, 1
+            WHERE @ALBUM_ID IS NOT NULL
+            ON DUPLICATE KEY UPDATE `tag_album_count` = `tag_album_count` + 1;
+
+            UPDATE `{$tagsTable}` SET `tag_files` = `tag_files` + 1
+            WHERE `tag_id` = @TAG_ID;
+
+            SQL;
+            foreach ($tag as $pos => $name) {
+                $sql .= str_replace('%', $pos, $template);
+                $binds[':tag_name_' . $pos] = $name;
+            }
+        }
+        $db = DB::getInstance();
+        $db->query($sql);
+        foreach ($binds as $key => $value) {
+            $db->bind($key, $value);
+        }
+        $db->exec();
+
+        $countSQL = <<<SQL
+        SELECT COUNT(*) `count`
+        FROM `{$tagsFilesTable}`
+        WHERE `tag_file_file_id` = {$id};
+        SQL;
+
+        return (int) (DB::queryFetchSingle($countSQL)['count'] ?? 0);
     }
 
     protected static function getPastTimeSpec(string $unit, string $value): string
@@ -2156,5 +2345,28 @@ class Image
         }
 
         return $insert;
+    }
+
+    /**
+     * Resolves the cache Redis holding the guest images set. Null falls
+     * back to the session, which is locked by both the files handler and
+     * the redis handler (redis.session.locking_enabled).
+     *
+     * @return null|array{0: Redis, 1: string}
+     */
+    private static function getGuestImagesRedis(): ?array
+    {
+        $sessionId = session_id();
+        if ($sessionId === '' || $sessionId === false) {
+            return null;
+        }
+        if (! Cache::isEnabled()) {
+            return null;
+        }
+
+        return [
+            Cache::instance()->redis(),
+            Cache::instance()->getKey('guest_images:' . $sessionId),
+        ];
     }
 }

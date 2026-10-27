@@ -86,9 +86,9 @@ class TenantUserPasswordResetPatch extends Controller
     public static function acceptBody(): ParameterInterface
     {
         return arrayp(
-            username: string(PCRE::USER_USERNAME->value),
+            username: string(PCRE::Username->value),
         )->withOptional(
-            password: string(PCRE::USER_PASSWORD->value)
+            password: string(PCRE::UserPassword->value)
         );
     }
 }
