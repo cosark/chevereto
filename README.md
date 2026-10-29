@@ -70,6 +70,11 @@ Chevereto is also available for installing via [Installatron](https://installatr
 
 Review our [Installation docs](https://v4-docs.chevereto.com/application/installing/installation.html) for all alternatives.
 
+## One-Click Deploy
+
+<a href="https://repocloud.io/details/Chevereto/"><img src="https://d16t0pc4846x52.cloudfront.net/deploylobe.svg" alt="Deploy on RepoCloud" height="42"></a>
+<a href="https://railway.com/deploy/chevereto"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="42"></a>
+
 ## Updating
 
 * Follow the [Updating guide](https://v4-docs.chevereto.com/application/installing/updating.html) to keep your Chevereto V4 system updated.
